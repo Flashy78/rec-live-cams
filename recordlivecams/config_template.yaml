@@ -1,0 +1,46 @@
+log_level: INFO
+streamlink_cmd: streamlink
+streamlink_plugin_path: "/app/plugins"
+streamlink_default_stream: best
+# Thumbnail generation options. This still fails a decent amount of time.
+vcsi_options: "--show-timestamp --width 1920 --grid 8x0 --start-delay-percent 0 --end-delay-percent 0 --interval 10s"
+# Check for streamers online in the last week every minute,
+# online in the last month every 5 min, over a month 10 min
+online_check_sec:
+    in_last_week: 5
+    in_last_month: 300
+    over_month: 600
+# Once this has been reached, start recording to a new file and process the old one. This does
+# appear to be pretty seamless. Depending on how the streamer is managing their stream, sometimes
+# this can continue recording when they've kicked people out from the website.
+max_recording_min: 59
+# The processing seems to mostly be disk access and cpu bound, so this can help the system work
+# normally if there are a bunch of files in the to_process folder, or if starting back up after
+# an unexpected shutdown.
+process_files_at_once: 2
+# vcsi seems to have a bug where it doesn't always clean up temp files and can slowly fill up the
+# docker container. This should be high enough so it doesn't try and delete any temp files that
+# are currently in use.
+thumbnail_cleanup_min: 59
+#No trailing slash
+sites:
+    bongacams:
+        url: "https://bongacams.com/{username}"
+        check_rate_limit_sec: 4
+    # This one doesn't seem to be working
+    cam4:
+        url: "https://www.cam4.com/{username}"
+        check_rate_limit_sec: 4
+    chaturbate: 
+        url: "https://chaturbate.com/{username}"
+        check_rate_limit_sec: 6
+    stripchat: 
+        url: "https://stripchat.com/{username}"
+        check_rate_limit_sec: 4
+
+streamers:
+    # Files are named with this
+    MyStreamerName:
+        # It will attempt to record at sites based on their order here
+        stripchat: MyStreamerName
+        bongacams: TheSameStreamerOnBonga
