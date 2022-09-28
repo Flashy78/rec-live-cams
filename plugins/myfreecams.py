@@ -3,7 +3,7 @@ import random
 import re
 import uuid
 
-from streamlink.compat import unquote
+from urllib.parse import unquote
 from streamlink.exceptions import NoStreamsError, PluginError
 from streamlink.plugin import Plugin, PluginArgument, PluginArguments
 from streamlink.plugin.api import useragents, validate

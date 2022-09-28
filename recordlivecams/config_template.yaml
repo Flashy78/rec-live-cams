@@ -10,6 +10,8 @@ online_check_sec:
     in_last_week: 5
     in_last_month: 300
     over_month: 600
+# How often to query the APIs for streamers online
+api_rate_limit_time_sec: 30
 # Once this has been reached, start recording to a new file and process the old one. This does
 # appear to be pretty seamless. Depending on how the streamer is managing their stream, sometimes
 # this can continue recording when they've kicked people out from the website.
@@ -27,6 +29,8 @@ sites:
     bongacams:
         url: "https://bongacams.com/{username}"
         check_rate_limit_sec: 4
+        api_key: "xxxxxx"
+        api_url: "https://bcprm.com/promo.php?c={API_KEY}&type=api&api_v=1&api_type=json"
     # This one doesn't seem to be working
     cam4:
         url: "https://www.cam4.com/{username}"
@@ -34,9 +38,12 @@ sites:
     chaturbate: 
         url: "https://chaturbate.com/{username}"
         check_rate_limit_sec: 6
+        api_key: "xxxxxx"
+        api_url: "https://chaturbate.com/affiliates/api/onlinerooms/?format=json&wm={API_KEY}"
     stripchat: 
         url: "https://stripchat.com/{username}"
         check_rate_limit_sec: 4
+        api_url: "https://go.xlirdr.com/api/models?status=public&limit=0"
 
 streamers:
     # Files are named with this

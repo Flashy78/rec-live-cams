@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import signal
@@ -9,22 +10,38 @@ from pathlib import Path
 from queue import Queue
 from threading import Thread
 from typing import Any, Dict
+from urllib.parse import unquote, urlparse
 
 import ffmpeg
+import requests
 import streamlink
 import yaml
 
+from recordlivecams.database.common import get_conn, run_sql, set_db_path
 from recordlivecams.processes import check_who_is_online
 
-_version = "0.3.4"
+_version = "1.0.0"
+
+
+@dataclass
+class Streamer_Site:
+    """Class for keeping track of a site setting for a streamer"""
+
+    site_name: str
+    streamer_name: str
+    is_primary: bool = True
+    # This is just to avoid trying to insert secondary site records every refresh
+    is_in_db: bool = True
 
 
 @dataclass
 class Streamer:
     """Class for keeping track of streamers"""
 
+    id: int
     name: str
-    sites: Dict[str, str]
+    sites: Dict[str, Streamer_Site]
+    watch: bool = False
     is_recording: bool = False
     started_at: datetime = datetime.now()
     last_checked_at: datetime = datetime.now()
@@ -36,6 +53,8 @@ class Site:
 
     name: str
     url: str
+    api_key: str
+    api_url: str
     rate_limit_sec: int
     last_checked_at: datetime
 
@@ -64,6 +83,9 @@ class Monitor:
         self.streamers_path = video_path / "streamers"
         self.streamers_path.mkdir(parents=True, exist_ok=True)
 
+        self.db_path = config_path / "db.sqlite3"
+        set_db_path(self.db_path)
+
         self.config_timestamp = None
         self.config_path = config_path / "config.yaml"
         self.config_template_path = config_template_path
@@ -75,7 +97,10 @@ class Monitor:
 
         self.start_recording_q = Queue()
 
+        # The order of these loads is important, should fix at some point
+        self._load_streamers_from_db()
         self._reload_config(False)
+        self._load_sites_from_db()
 
         # On startup, deal with any lingering files that need to be processed
         for file in self.video_path_in_progress.glob("*"):
@@ -114,29 +139,6 @@ class Monitor:
                 process["process"].send_signal(signal.SIGINT)
                 process["process"].wait()
 
-    def _get_streamer_path(self, name) -> Path:
-        return self.streamers_path / f"{name}.txt"
-
-    def _load_streamer_file(self, name) -> datetime:
-        """Load a streamer file which should contain the last time they were seen online"""
-        streamer_path = self._get_streamer_path(name)
-        if streamer_path.is_file():
-            with open(streamer_path, "r") as f:
-                date_text = f.read()
-        else:
-            # They're new, give them a starting file
-            date_text = self._save_streamer_file(name)
-
-        return datetime.strptime(date_text, "%y-%m-%d-%H%M")
-
-    def _save_streamer_file(self, name) -> None:
-        """Update a streamer file to indicate they were seen online now"""
-        streamer_path = self._get_streamer_path(name)
-        date_text = datetime.now().strftime("%y-%m-%d-%H%M")
-        with open(streamer_path, "w") as f:
-            f.write(date_text)
-        return date_text
-
     def _load_config(self) -> Any:
         # opens file, returns json dict, returns None if error
         try:
@@ -168,43 +170,60 @@ class Monitor:
             else:
                 return
 
-            self.logger.setLevel(self.config["log_level"])
-
-            # Init all sites to have been last checked now
-            for site, data in self.config["sites"].items():
-                self.sites[site] = Site(
-                    name=site,
-                    url=data["url"],
-                    rate_limit_sec=data["check_rate_limit_sec"],
-                    last_checked_at=datetime.now(),
-                )
-
+            # Get the latest list of streamers to watch
             removed = []
             added = []
-            # Remove deleted streamers
+            # Stop watching deleted streamers
             for name in list(self.streamers.keys()):
                 if name not in self.config["streamers"].keys():
-                    removed.append(name)
-                    del self.streamers[name]
+                    if self.streamers[name].watch:
+                        removed.append(name)
+                    self.streamers[name].watch = False
 
             # Update all other streamers
-            if self.config["streamers"]:
-                for name, sites in self.config["streamers"].items():
-                    if name not in self.streamers.keys():
-                        self.streamers[name] = Streamer(name=name, sites=sites)
-                        # Check when last seen online
-                        self.streamers[name].started_at = self._load_streamer_file(name)
+            for name, sites in self.config["streamers"].items():
+                if name not in self.streamers.keys():
+                    self.logger.warning(f"Streamer {name} not found in the database")
+                    # Create the in memory record for them, with no id
+                    streamer_sites = {}
+                    for site, username in sites.items():
+                        is_primary = False
+                        if username == name:
+                            is_primary = True
 
-                        if check_if_new_streamers_online:
-                            # Newly added, so let's immediately check if they're online
-                            for site in self.streamers[name].sites:
-                                if self._is_online(name, site):
-                                    self._start_recording(name, site)
-                                    break
+                        streamer_sites[site] = Streamer_Site(
+                            site_name=site,
+                            streamer_name=username,
+                            is_primary=is_primary,
+                            is_in_db=False,
+                        )
 
-                        added.append(name)
-                    else:
-                        self.streamers[name].sites = sites
+                    self.streamers[name] = Streamer(
+                        id=None, name=name, sites=streamer_sites, watch=True
+                    )
+
+                    if check_if_new_streamers_online:
+                        # Newly added, so let's immediately check if they're online
+                        for site in self.streamers[name].sites:
+                            if self._is_online(name, site):
+                                self._start_recording(name, site)
+                                break
+
+                    added.append(name)
+                else:
+                    self.streamers[name].watch = True
+
+                    # Remove any primary sites that are assigned
+                    for site, site_name in sites.items():
+                        if (
+                            site_name != name
+                            and site in self.streamers[name].sites
+                            and self.streamers[name].sites[site].is_primary
+                        ):
+                            sites = run_sql(
+                                "UPDATE streamer_sites SET is_primary = 0 WHERE streamer_id = ? AND site_name = ?;",
+                                (self.streamers[name].id, site),
+                            )
 
             if removed:
                 self.logger.info(
@@ -214,6 +233,8 @@ class Monitor:
                 self.logger.info(
                     f"Added: {(', ').join(sorted(added, key=str.casefold))}"
                 )
+
+            self.logger.setLevel(self.config["log_level"])
         except Exception as e:
             self.logger.exception("Unable to load config")
 
@@ -252,7 +273,7 @@ class Monitor:
         if sec_to_sleep > 0:
             time.sleep(sec_to_sleep)
 
-        username = self.streamers[name].sites[site]
+        username = self.streamers[name].sites[site].streamer_name
         self.sites[site].last_checked_at = datetime.now()
         self.streamers[name].last_checked_at = datetime.now()
         streams = {}
@@ -295,9 +316,7 @@ class Monitor:
         filename = str(self.video_path_in_progress / f"{name}-{timestamp}-{site}.mp4")
         self.logger.debug(f"Saving to {filename}")
 
-        self._save_streamer_file(name)
-
-        username = self.streamers[name].sites[site]
+        username = self.streamers[name].sites[site].streamer_name
         url = self.sites[site].url.replace("{username}", username)
         cmd = self.config["streamlink_cmd"].split(" ") + [
             url,
@@ -532,19 +551,21 @@ class Monitor:
 
     def _generate_thumbnails(self, video_path):
         """Kick off a vcsi process to generate a thumbnail file"""
-        self.logger.debug(f"Generating thumbnails for: {video_path}")
-        cmd = ["vcsi", video_path] + self.config["vcsi_options"].split(" ")
-        self.logger.debug(" ".join(cmd))
-        self.thumb_processes[video_path] = {
-            "started_at": datetime.now(),
-            "process": subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-            ),
-        }
+
+        if "vcsi_options" in self.config:
+            self.logger.debug(f"Generating thumbnails for: {video_path}")
+            cmd = ["vcsi", video_path] + self.config["vcsi_options"].split(" ")
+            self.logger.debug(" ".join(cmd))
+            self.thumb_processes[video_path] = {
+                "started_at": datetime.now(),
+                "process": subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                ),
+            }
 
     def _check_generate_thumbnail_processes(self):
         for video_path in list(self.thumb_processes):
@@ -649,11 +670,269 @@ class Monitor:
             self._check_generate_thumbnail_processes()
             time.sleep(3)
 
+    def _load_sites_from_db(self):
+        """Load the sites from the database, and add in data from the config file"""
+        sites = run_sql("SELECT name, display_name FROM site;")
+        for site in sites:
+            config_site = self.config["sites"][site[0]]
+
+            self.sites[site[0]] = Site(
+                name=site[0],
+                url=config_site["url"],
+                api_key=config_site.get("api_key", None),
+                api_url=config_site.get("api_url", None),
+                rate_limit_sec=config_site["check_rate_limit_sec"],
+                # Init all sites to have been last checked now
+                last_checked_at=datetime.now(),
+            )
+
+    def _load_streamers_from_db(self):
+        """Load the streamers from the database"""
+        streamers = run_sql(
+            """
+            SELECT streamer_sites.streamer_id, streamer_sites.name, streamer_sites.is_primary, streamer_sites.site_name
+            FROM streamer_sites;
+            """
+        )
+
+        non_primary_streamers = []
+        for streamer in streamers:
+            if streamer["is_primary"]:
+                self.streamers[streamer["name"]] = Streamer(
+                    id=streamer["streamer_id"],
+                    name=streamer["name"],
+                    sites={
+                        streamer["site_name"]: Streamer_Site(
+                            site_name=streamer["site_name"],
+                            streamer_name=streamer["name"],
+                            is_primary=True,
+                        )
+                    },
+                )
+            else:
+                non_primary_streamers.append(streamer)
+
+        # Now we can add the non-primary streamers to their existing entry
+        for non_primary_streamer in non_primary_streamers:
+            for streamer in self.streamers.values():
+                if streamer.id == non_primary_streamer["streamer_id"]:
+                    streamer.sites[non_primary_streamer["site_name"]] = Streamer_Site(
+                        site_name=non_primary_streamer["site_name"],
+                        streamer_name=non_primary_streamer["name"],
+                        is_primary=False,
+                    )
+                    break
+
+    def _query_site_api(self, site_name):
+        url = self.sites[site_name].api_url
+        if self.sites[site_name].api_key:
+            url = url.replace("{API_KEY}", self.sites[site_name].api_key)
+
+        try:
+            r = requests.get(url)
+            r.raise_for_status()
+            data = r.json()
+            """
+            # TODO: Stop using file
+            with open(
+                Path(f"C:\\Users\\Matt\\code\\rec-live-cams\{site_name}.json")
+            ) as f:
+                data = json.load(f)
+            """
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"{site_name} error: ", e)
+            return
+
+        if site_name == "stripchat":
+            data = data["models"]
+
+        # Loop through the currently loaded streamers to find new ones
+        streamers_to_add = []
+        streamers_to_update = []
+        for streamer in data:
+            username = streamer["username"]
+            # If they exist and have a database id
+            if username in self.streamers and self.streamers[username].id:
+                streamers_to_update.append(
+                    (
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        self.streamers[username].id,
+                    )
+                )
+                # Should we start recording them?
+                if self.streamers[username].watch:
+                    if site_name == "chaturbate":
+                        if streamer["current_show"] == "public":
+                            self._start_recording(username, site_name)
+                    elif site_name == "stripchat":
+                        if streamer["status"] == "public":
+                            self._start_recording(username, site_name)
+                    else:
+                        self._start_recording(username, site_name)
+            else:
+                found = False
+                # They don't have a primary record, maybe they are on multiple sites
+                for existing_streamer in self.streamers.values():
+                    if existing_streamer.id and site_name in existing_streamer.sites:
+                        if existing_streamer.sites[site_name].streamer_name == username:
+                            found = True
+                            streamers_to_update.append(
+                                (
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    existing_streamer.id,
+                                )
+                            )
+
+                            # Create a streamer_site record for them
+                            if not existing_streamer.sites[site_name].is_in_db:
+                                # Site assigned id instead of username
+                                site_id = "NULL"
+                                if "id" in streamer:
+                                    site_id = streamer["id"]
+
+                                streamers = run_sql(
+                                    """
+                                    INSERT INTO streamer_sites(streamer_id, name, site_id, is_primary, site_name)
+                                    VALUES (?, ?, ?, ?, ?);
+                                    """,
+                                    (
+                                        existing_streamer.id,
+                                        username,
+                                        site_id,
+                                        0,
+                                        site_name,
+                                    ),
+                                )
+                                existing_streamer.sites[site_name].is_in_db = True
+
+                            # Should we start recording them?
+                            if existing_streamer.watch:
+                                self._start_recording(existing_streamer.name, site_name)
+
+                if not found:
+                    streamers_to_add.append(streamer)
+
+        self.logger.debug(f"{len(streamers_to_add)} streamers to add")
+        self.logger.debug(f"{len(streamers_to_update)} streamers to update")
+
+        conn = get_conn()
+        c = conn.cursor()
+        # Add everyone new to the db
+        for streamer in streamers_to_add:
+            username = streamer["username"]
+            c.execute(
+                f"INSERT INTO streamer (first_online) VALUES ('{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}')"
+            )
+            # Create/Update the in memory record for them
+            if username in self.streamers:
+                self.streamers[username].id = c.lastrowid
+
+                if site_name not in self.streamers[username].sites:
+                    self.streamers[username].sites[site_name] = Streamer_Site(
+                        site_name=site_name, streamer_name=streamer["username"]
+                    )
+
+                # Should we start recording them?
+                if self.streamers[username].watch:
+                    self._start_recording(username, site_name)
+            else:
+                self.streamers[username] = Streamer(
+                    id=c.lastrowid,
+                    name=username,
+                    sites={
+                        site_name: Streamer_Site(
+                            site_name=site_name, streamer_name=username
+                        )
+                    },
+                )
+
+            # Site assigned id instead of username
+            site_id = "NULL"
+            if "id" in streamer:
+                site_id = f"'{streamer['id']}'"
+
+            c.execute(
+                f"INSERT INTO streamer_sites (streamer_id, name, site_id, site_name) VALUES ({c.lastrowid}, \"{streamer['username']}\", {site_id}, '{site_name}')"
+            )
+        conn.commit()
+
+        # Update everyone's last seen to now
+        c.executemany(
+            "UPDATE streamer SET last_online = ? WHERE id = ?", streamers_to_update
+        )
+        conn.commit()
+
+        # For new streamers, get a picture of them
+        self._get_thumbnail(streamers_to_add, site_name)
+
+    def _get_thumbnail(self, streamers, site):
+        for streamer in streamers:
+            json_url = None
+
+            if site == "chaturbate" and "image_url" in streamer:
+                json_url = streamer["image_url"]
+            elif site == "stripchat":
+                if "mlPreviewImage" not in streamer:
+                    json_url = streamer["snapshotUrl"]
+                else:
+                    json_url = streamer["mlPreviewImage"]
+            elif site == "bongacams":
+                if "profile_images" in streamer:
+                    if "thumbnail_image_big_live" in streamer["profile_images"]:
+                        json_url = streamer["profile_images"][
+                            "thumbnail_image_big_live"
+                        ]
+                    elif "thumbnail_image_medium_live" in streamer["profile_images"]:
+                        json_url = streamer["profile_images"][
+                            "thumbnail_image_medium_live"
+                        ]
+                    elif "thumbnail_image_small_live" in streamer["profile_images"]:
+                        json_url = streamer["profile_images"][
+                            "thumbnail_image_small_live"
+                        ]
+                if json_url:
+                    json_url = json_url.replace("//", "https://")
+
+            if not json_url:
+                continue
+
+            thumb_url = urlparse(json_url.replace("\\", ""))
+            name_path = Path(unquote(thumb_url.path))
+            prefix = streamer["username"][0].lower()
+            if not prefix.isalpha():
+                prefix = "#"
+
+            folder = self.streamers_path / prefix
+            folder.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%y-%m-%d-%H%M")
+            thumb_path = (
+                folder
+                / f"{streamer['username']}-{timestamp}-{site}{name_path.suffix if name_path.suffix else '.jpg'}"
+            )
+
+            resp = requests.get(thumb_url.geturl())
+            if resp.ok:
+                img_data = resp.content
+                if len(img_data) == 21971:
+                    # Default chaturbate image
+                    continue
+
+                with open(thumb_path, "wb") as handle:
+                    handle.write(img_data)
+
     def run(self):
         while self.running:
             try:
                 # Reload config to check for streamer changes
                 self._reload_config()
+
+                # Query Chaturbate API
+                self._query_site_api("chaturbate")
+                # Query Stripchat API
+                self._query_site_api("stripchat")
+                # Query Stripchat API
+                self._query_site_api("bongacams")
 
                 self._run_check_online_thread()
                 while not self.start_recording_q.empty():
@@ -670,7 +949,7 @@ class Monitor:
                 self._list_who_is_recording()
 
                 # Wait in 1 second intervals before restarting loop
-                for i in range(5):
+                for i in range(self.config["api_rate_limit_time_sec"]):
                     if not self.running:
                         break
 
@@ -681,4 +960,6 @@ class Monitor:
                 time.sleep(1)
 
         # self._stop_gracefully()
+        conn = get_conn()
+        conn.close()
         self.logger.info("Fully stopped")

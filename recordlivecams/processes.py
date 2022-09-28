@@ -52,13 +52,16 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
         streamer.last_checked_at = datetime.now()
 
         for site in streamer.sites:
+            if site == "chaturbate" or site == "stripchat" or site == "bongacams":
+                continue
+
             # Check if we need to pause for rate limiting when pinging a site
             diff_in_sec = datetime.now() - sites[site].last_checked_at
             sec_to_sleep = sites[site].rate_limit_sec - diff_in_sec.total_seconds()
             if sec_to_sleep > 0:
                 time.sleep(sec_to_sleep)
 
-            username = streamer.sites[site]
+            username = streamer.sites[site].streamer_name
             sites[site].last_checked_at = datetime.now()
             streams = {}
             try:

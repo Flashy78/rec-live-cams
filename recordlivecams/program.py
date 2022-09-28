@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from recordlivecams.monitor import Monitor
+from recordlivecams.database import migrator
 
 config_path = Path("/app/config")
 config_template_path = Path("/app/recordlivecams/config_template.yaml")
@@ -17,6 +18,8 @@ def main():
     )
     logger = logging.getLogger()
     logger.info("Starting up")
+
+    migrator.migrate(logger, config_path / "db.sqlite3")
 
     monitor = Monitor(logger, config_path, config_template_path, video_path)
     monitor.run()

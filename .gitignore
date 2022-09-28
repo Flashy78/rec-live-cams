@@ -131,3 +131,8 @@ dmypy.json
 .vscode/
 debug.py
 debug.yaml
+config.yaml
+chaturbate.json
+stripchat.json
+bongacams.json
+db.sqlite3*
