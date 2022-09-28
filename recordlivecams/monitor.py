@@ -139,6 +139,29 @@ class Monitor:
                 process["process"].send_signal(signal.SIGINT)
                 process["process"].wait()
 
+    def _get_streamer_path(self, name) -> Path:
+        return self.streamers_path / f"{name}.txt"
+
+    def _load_streamer_file(self, name) -> datetime:
+        """Load a streamer file which should contain the last time they were seen online"""
+        streamer_path = self._get_streamer_path(name)
+        if streamer_path.is_file():
+            with open(streamer_path, "r") as f:
+                date_text = f.read()
+        else:
+            # They're new, give them a starting file
+            date_text = self._save_streamer_file(name)
+
+        return datetime.strptime(date_text, "%y-%m-%d-%H%M")
+
+    def _save_streamer_file(self, name) -> None:
+        """Update a streamer file to indicate they were seen online now"""
+        streamer_path = self._get_streamer_path(name)
+        date_text = datetime.now().strftime("%y-%m-%d-%H%M")
+        with open(streamer_path, "w") as f:
+            f.write(date_text)
+        return date_text
+
     def _load_config(self) -> Any:
         # opens file, returns json dict, returns None if error
         try:
@@ -201,6 +224,7 @@ class Monitor:
                     self.streamers[name] = Streamer(
                         id=None, name=name, sites=streamer_sites, watch=True
                     )
+                    self.streamers[name].started_at = self._load_streamer_file(name)
 
                     if check_if_new_streamers_online:
                         # Newly added, so let's immediately check if they're online
@@ -254,6 +278,11 @@ class Monitor:
             self.logger.warn(
                 f"Recording {len(recording)} streamers, but {len(self.processes)} threads running"
             )
+            # Sometimes a streamer gets marked as being recorded, but the thread is cancelled and not caught
+            for name in recording:
+                if name not in self.processes:
+                    self.logger.info(f"Marking {name} as not being recorded")
+                    self.streamers[name].is_recording = False
 
         index_procs = len(self.index_processes)
         thumb_procs = len(self.thumb_processes)
@@ -315,6 +344,8 @@ class Monitor:
         self.video_path_in_progress.mkdir(parents=True, exist_ok=True)
         filename = str(self.video_path_in_progress / f"{name}-{timestamp}-{site}.mp4")
         self.logger.debug(f"Saving to {filename}")
+
+        self._save_streamer_file(name)
 
         username = self.streamers[name].sites[site].streamer_name
         url = self.sites[site].url.replace("{username}", username)

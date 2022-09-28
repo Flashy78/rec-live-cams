@@ -1,9 +1,8 @@
-from logging import log
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict
 
 import streamlink
+from websocket import _exceptions
 
 # Object that signals shutdown
 _sentinel = object()
@@ -75,8 +74,14 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
                     logger.debug(
                         f"Streamlink plugin error while checking is_online: {ex}"
                     )
+            except _exceptions.WebSocketConnectionClosedException as ex:
+                logger.info(
+                    f"Websocket closed exception while checking: {username} at {site}"
+                )
             except Exception:
-                logger.exception("is_online exception")
+                logger.exception(
+                    f"check_who_is_online unexpected exception while checking: {username} at {site}"
+                )
 
             if len(streams) > 1:
                 start_recording_q.put((streamer.name, site))
