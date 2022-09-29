@@ -791,6 +791,34 @@ class Monitor:
                         self.streamers[username].id,
                     )
                 )
+
+                # Are they missing a record for this site?
+                if site_name not in self.streamers[username].sites:
+                    # Site assigned id instead of username
+                    site_id = "NULL"
+                    if "id" in streamer:
+                        site_id = streamer["id"]
+
+                    run_sql(
+                        """
+                        INSERT INTO streamer_sites(streamer_id, name, site_id, is_primary, site_name)
+                        VALUES (?, ?, ?, ?, ?);
+                        """,
+                        (
+                            self.streamers[username].id,
+                            username,
+                            site_id,
+                            0,
+                            site_name,
+                        ),
+                    )
+                    self.streamers[username].sites[site_name] = Streamer_Site(
+                        site_name=site_name,
+                        streamer_name=username,
+                        is_primary=False,
+                        is_in_db=True,
+                    )
+
                 # Should we start recording them?
                 if self.streamers[username].watch:
                     if site_name == "chaturbate":
@@ -803,6 +831,7 @@ class Monitor:
                         self._start_recording(username, site_name)
             else:
                 found = False
+
                 # They don't have a primary record, maybe they are on multiple sites
                 for existing_streamer in self.streamers.values():
                     if existing_streamer.id and site_name in existing_streamer.sites:
