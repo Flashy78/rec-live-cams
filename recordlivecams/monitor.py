@@ -775,7 +775,7 @@ class Monitor:
             """
 
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"{site_name} error: ", e)
+            self.logger.exception(f"{site_name} Error")
             return
 
         if site_name == "stripchat":

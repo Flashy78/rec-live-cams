@@ -1,21 +1,13 @@
-FROM python:3.9-bullseye
+FROM python:3.10-bullseye
 
-ENV streamlinkVersion=2.4.0
 ENV TZ=America/Los_Angeles
-
-ADD https://github.com/streamlink/streamlink/releases/download/${streamlinkVersion}/streamlink-${streamlinkVersion}.tar.gz /opt/
 
 # RUN apt-get update && apt-get install gosu
 
-# Install Streamlink
-RUN tar -xzf /opt/streamlink-${streamlinkVersion}.tar.gz -C /opt/ && \
-    rm /opt/streamlink-${streamlinkVersion}.tar.gz && \
-    cd /opt/streamlink-${streamlinkVersion}/ && \
-    python setup.py install
-
-# Install ffmpeg
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+# If you don't have Debian backports already (see link below):
+RUN echo "deb http://deb.debian.org/debian bullseye-backports main" | tee "/etc/apt/sources.list.d/streamlink.list"
+RUN apt update && \
+    apt -t bullseye-backports install -y streamlink && \
     rm -rf /var/lib/apt/lists/*
 
 # Install vcsi
