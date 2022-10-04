@@ -8,6 +8,7 @@ from streamlink.exceptions import NoStreamsError, PluginError
 from streamlink.plugin import Plugin, PluginArgument, PluginArguments
 from streamlink.plugin.api import useragents, validate
 from streamlink.stream import DASHStream, HLSStream
+from streamlink.utils import parse_json
 
 from websocket import create_connection
 
@@ -80,7 +81,7 @@ class MyFreeCams(Plugin):
         if php_data is None:
             raise NoStreamsError(self.url)
 
-        php_data = self.session.http.json(php_data.group("data"))
+        php_data = parse_json(php_data.group("data"))
         php_url = self.PHP_URL.format(
             opts=php_data["opts"],
             respkey=php_data["respkey"],
@@ -148,7 +149,8 @@ class MyFreeCams(Plugin):
                 )
                 if try_to_connect == 5:
                     log.error("can't connect to the websocket")
-                    raise
+                    # raise
+                    raise NoStreamsError(self.url)
 
         buff = ""
         php_message = ""
@@ -197,7 +199,7 @@ class MyFreeCams(Plugin):
         global JS_SERVER_CACHE
         if not JS_SERVER_CACHE:
             res = self.session.http.get(self.JS_SERVER_URL)
-            servers = self.session.http.json(res.text)
+            servers = parse_json(res.text)
             JS_SERVER_CACHE = servers
         return JS_SERVER_CACHE
 
@@ -240,9 +242,7 @@ class MyFreeCams(Plugin):
             if data is None:
                 raise NoStreamsError(self.url)
             try:
-                data = self.session.http.json(
-                    data.group("data"), schema=self._data_schema
-                )
+                data = parse_json(data.group("data"), schema=self._data_schema)
             except PluginError:
                 log.info("Unable to validate json")
                 raise NoStreamsError(self.url)
