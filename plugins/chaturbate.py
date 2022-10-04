@@ -1,7 +1,7 @@
 import re
 import uuid
 
-from streamlink.plugin import Plugin
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import validate
 from streamlink.stream import HLSStream
 
@@ -10,19 +10,12 @@ API_HLS = "https://chaturbate.com/get_edge_hls_url_ajax/"
 _url_re = re.compile(r"https?://(\w+\.)?chaturbate\.com/(?P<username>\w+)")
 
 _post_schema = validate.Schema(
-    {
-        "url": validate.text,
-        "room_status": validate.text,
-        "success": int
-    }
+    {"url": validate.text, "room_status": validate.text, "success": int}
 )
 
 
+@pluginmatcher(re.compile(r"https?://(\w+\.)?chaturbate\.com/(?P<username>\w+)"))
 class Chaturbate(Plugin):
-    @classmethod
-    def can_handle_url(cls, url):
-        return _url_re.match(url)
-
     def _get_streams(self):
         match = _url_re.match(self.url)
         username = match.group("username")
@@ -42,12 +35,16 @@ class Chaturbate(Plugin):
 
         post_data = "room_slug={0}&bandwidth=high".format(username)
 
-        res = self.session.http.post(API_HLS, headers=headers, cookies=cookies, data=post_data)
+        res = self.session.http.post(
+            API_HLS, headers=headers, cookies=cookies, data=post_data
+        )
         data = self.session.http.json(res, schema=_post_schema)
 
         self.logger.info("Stream status: {0}".format(data["room_status"]))
-        if (data["success"] is True and data["room_status"] == "public" and data["url"]):
-            for s in HLSStream.parse_variant_playlist(self.session, data["url"]).items():
+        if data["success"] is True and data["room_status"] == "public" and data["url"]:
+            for s in HLSStream.parse_variant_playlist(
+                self.session, data["url"]
+            ).items():
                 yield s
 
 
