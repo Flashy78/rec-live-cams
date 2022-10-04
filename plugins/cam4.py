@@ -1,13 +1,13 @@
 import re
 
-from streamlink.plugin import Plugin
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import useragents, validate
 from streamlink.stream import HLSStream
 from streamlink.utils import parse_json
 
 
+@pluginmatcher(re.compile(r"https?://([a-z]+\.)?cam4.com/.+"))
 class Cam4(Plugin):
-    _url_re = re.compile(r"https?://([a-z]+\.)?cam4.com/.+")
     _video_data_re = re.compile(
         r"flashData: (?P<flash_data>{.*}), hlsUrl: '(?P<hls_url>.+?)'"
     )
@@ -28,10 +28,6 @@ class Cam4(Plugin):
             ),
         )
     )
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return Cam4._url_re.match(url)
 
     def _get_streams(self):
         res = self.session.http.get(

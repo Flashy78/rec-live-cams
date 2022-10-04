@@ -5,7 +5,7 @@ import uuid
 
 from urllib.parse import unquote
 from streamlink.exceptions import NoStreamsError, PluginError
-from streamlink.plugin import Plugin, PluginArgument, PluginArguments
+from streamlink.plugin import Plugin, PluginArgument, PluginArguments, pluginmatcher
 from streamlink.plugin.api import useragents, validate
 from streamlink.stream import DASHStream, HLSStream
 from streamlink.utils import parse_json
@@ -16,6 +16,12 @@ log = logging.getLogger(__name__)
 JS_SERVER_CACHE = None
 
 
+@pluginmatcher(
+    re.compile(
+        r"""https?://(?:\w+\.)?myfreecams\.com/(?:(?:models/)?\#?(?P<username>\w+)|\?id=(?P<user_id>\d+))""",
+        re.VERBOSE,
+    )
+)
 class MyFreeCams(Plugin):
     """Streamlink Plugin for MyFreeCams
     UserName
@@ -59,10 +65,6 @@ class MyFreeCams(Plugin):
             """,
         )
     )
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls._url_re.match(url) is not None
 
     def _php_fallback(self, username, user_id, php_message):
         """Use the php website as a fallback when
