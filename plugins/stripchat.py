@@ -1,7 +1,7 @@
 import logging
 import re
 
-from streamlink.plugin import Plugin
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import validate
 from streamlink.stream import HLSStream
 
@@ -24,11 +24,10 @@ _post_schema = validate.Schema(
 )
 
 
+@pluginmatcher(
+    re.compile(r"https?://(\w+\.)?stripchat\.com/(?P<username>[a-zA-Z0-9_-]+)")
+)
 class Stripchat(Plugin):
-    @classmethod
-    def can_handle_url(cls, url):
-        return _url_re.match(url)
-
     def _get_streams(self):
         match = _url_re.match(self.url)
         username = match.group("username")
