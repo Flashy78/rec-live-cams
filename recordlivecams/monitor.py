@@ -755,6 +755,9 @@ class Monitor:
                     break
 
     def _query_site_api(self, site_name):
+        if not self.sites[site_name].api_url:
+            return
+
         url = self.sites[site_name].api_url
         if self.sites[site_name].api_key:
             url = url.replace("{API_KEY}", self.sites[site_name].api_key)
@@ -927,6 +930,12 @@ class Monitor:
         self._get_thumbnail(streamers_to_add, site_name)
 
     def _get_thumbnail(self, streamers, site):
+        if (
+            "download_streamer_thumb" not in self.config
+            or not self.config["download_streamer_thumb"]
+        ):
+            return
+
         for streamer in streamers:
             json_url = None
 

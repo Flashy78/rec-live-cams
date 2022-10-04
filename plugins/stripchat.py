@@ -1,8 +1,11 @@
+import logging
 import re
 
 from streamlink.plugin import Plugin
 from streamlink.plugin.api import validate
 from streamlink.stream import HLSStream
+
+log = logging.getLogger(__name__)
 
 _url_re = re.compile(r"https?://(\w+\.)?stripchat\.com/(?P<username>[a-zA-Z0-9_-]+)")
 
@@ -39,6 +42,12 @@ class Stripchat(Plugin):
         }
 
         res = self.session.http.get(api_call, headers=headers)
+
+        # This needs to happen before the call to .json because the validation will fail on the cam key
+        if res.json()["user"]["user"]["isDeleted"]:
+            log.warn(f"Stripchat user {username} is deleted")
+            return
+
         data = self.session.http.json(res, schema=_post_schema)
 
         server = "https://b-{0}.strpst.com/hls/{1}/master_{1}.m3u8".format(

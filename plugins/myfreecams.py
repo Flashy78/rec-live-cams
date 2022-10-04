@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import logging
 import random
 import re
@@ -13,6 +14,7 @@ from streamlink.utils import parse_json
 from websocket import create_connection
 
 log = logging.getLogger(__name__)
+JS_SERVER_CACHE = None
 
 
 class MyFreeCams(Plugin):
@@ -193,9 +195,13 @@ class MyFreeCams(Plugin):
         return message, php_message
 
     def _get_servers(self):
-        res = self.session.http.get(self.JS_SERVER_URL)
-        servers = parse_json(res.text)
-        return servers
+        # Check if we've cached it during this current thread of online checks
+        global JS_SERVER_CACHE
+        if not JS_SERVER_CACHE:
+            res = self.session.http.get(self.JS_SERVER_URL)
+            servers = parse_json(res.text)
+            JS_SERVER_CACHE = servers
+        return JS_SERVER_CACHE
 
     def _get_camserver(self, servers, key):
         server_type = None
@@ -219,8 +225,6 @@ class MyFreeCams(Plugin):
 
     def _get_streams(self):
         self.session.http.headers.update({"User-Agent": useragents.FIREFOX})
-        log.debug("Version 2018-07-12")
-        log.info("This is a custom plugin. ")
         match = self._url_re.match(self.url)
         username = match.group("username")
         user_id = match.group("user_id")
@@ -237,21 +241,25 @@ class MyFreeCams(Plugin):
             data = self._dict_re.search(message)
             if data is None:
                 raise NoStreamsError(self.url)
-            data = parse_json(data.group("data"), schema=self._data_schema)
+            try:
+                data = parse_json(data.group("data"), schema=self._data_schema)
+            except PluginError:
+                log.info("Unable to validate json")
+                raise NoStreamsError(self.url)
 
         vs = data["vs"]
         ok_vs = [0, 90]
         if vs not in ok_vs:
             if vs == 2:
-                log.info("Model is currently away")
+                log.info(f"{username} is currently away")
             elif vs == 12:
-                log.info("Model is currently in a private show")
+                log.info(f"{username} is currently in a private show")
             elif vs == 13:
-                log.info("Model is currently in a group show")
+                log.info(f"{username} is currently in a group show")
             elif vs == 127:
-                log.info("Model is currently offline")
+                log.info(f"{username} is currently offline")
             else:
-                log.error("Stream status: {0}".format(vs))
+                log.error(f"{username} stream status: {0}".format(vs))
             raise NoStreamsError(self.url)
 
         log.debug("VS: {0}".format(vs))
@@ -259,6 +267,11 @@ class MyFreeCams(Plugin):
         nm = data["nm"]
         uid = data["uid"]
         uid_video = uid + 100000000
+
+        if "u" not in data:
+            log.info("Missing u key in data")
+            raise NoStreamsError(self.url)
+
         camserver = data["u"]["camserv"]
 
         server, server_type = self._get_camserver(servers, camserver)
@@ -267,6 +280,10 @@ class MyFreeCams(Plugin):
             fallback_data = self._php_fallback(username, user_id, php_message)
             camserver = fallback_data["u"]["camserv"]
             server, server_type = self._get_camserver(servers, camserver)
+
+        if username != nm:
+            log.info(f"Original username {username} does not match nm {nm}")
+            raise NoStreamsError(self.url)
 
         log.info("Username: {0}".format(nm))
         log.info("User ID:  {0}".format(uid))

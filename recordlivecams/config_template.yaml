@@ -4,6 +4,8 @@ streamlink_plugin_path: "/app/plugins"
 streamlink_default_stream: best
 # Thumbnail generation options. This still fails a decent amount of time.
 vcsi_options: "--show-timestamp --width 1920 --grid 8x0 --start-delay-percent 0 --end-delay-percent 0 --interval 10s"
+# Download streamer thumbnail when first seen online
+download_streamer_thumb: True
 # Check for streamers online in the last week every minute,
 # online in the last month every 5 min, over a month 10 min
 online_check_sec:
@@ -26,6 +28,8 @@ process_files_at_once: 2
 thumbnail_cleanup_min: 59
 #No trailing slash
 sites:
+    # Remove the api_url field to make the site fall back to checking each
+    # individual performer's online status.
     bongacams:
         url: "https://bongacams.com/{username}"
         check_rate_limit_sec: 4

@@ -25,7 +25,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
     last_month = datetime.now() - timedelta(days=30)
 
     for streamer in list(streamers.values()):
-        if streamer.is_recording:
+        if not streamer.watch or streamer.is_recording:
             continue
 
         # Should we skip this streamer because they haven't been online in a long
@@ -51,7 +51,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
         streamer.last_checked_at = datetime.now()
 
         for site in streamer.sites:
-            if site == "chaturbate" or site == "stripchat" or site == "bongacams":
+            if "api_url" in config["sites"][site]:
                 continue
 
             # Check if we need to pause for rate limiting when pinging a site
