@@ -1010,6 +1010,7 @@ class Monitor:
             ].last_picture_at < datetime.now() - timedelta(
                 minutes=self.config["new_streamer_thumb_min"]
             ):
+                self.streamers[streamer["username"]].last_picture_at = datetime.now()
                 streamers_to_get.append(streamer)
 
         self.logger.debug(f"Getting new thumbs for {len(streamers_to_get)} streamers")
