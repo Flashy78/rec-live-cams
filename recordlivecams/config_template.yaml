@@ -10,6 +10,8 @@ download_streamer_thumb: True
 download_new_streamer_thumb: True
 # How often to get new streamer thumbnails
 new_streamer_thumb_min: 60
+# Ignore streamers with gender male
+ignore_male_streamers: True
 
 # Check for streamers online in the last week every minute,
 # online in the last month every 5 min, over a month 10 min

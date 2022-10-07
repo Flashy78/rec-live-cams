@@ -782,12 +782,24 @@ class Monitor:
         if site_name == "stripchat":
             data = data["models"]
 
+        male_genders = ["Male", "Couple Male + Male", "m", "male", "males"]
         # Loop through the currently loaded streamers to find new ones
         streamers_to_add = []
         streamers_to_update = []
         streamers_new = []
         for streamer in data:
             username = streamer["username"]
+
+            # Skip male streamers
+            if self.config.get("ignore_male_streamers", False):
+                is_male = False
+                for text in male_genders:
+                    if streamer.get("gender") == text:
+                        is_male = True
+                        break
+                if is_male:
+                    continue
+
             # If they exist and have a database id
             if username in self.streamers and self.streamers[username].id:
                 streamers_to_update.append(
