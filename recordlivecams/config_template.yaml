@@ -6,6 +6,11 @@ streamlink_default_stream: best
 vcsi_options: "--show-timestamp --width 1920 --grid 8x0 --start-delay-percent 0 --end-delay-percent 0 --interval 10s"
 # Download streamer thumbnail when first seen online
 download_streamer_thumb: True
+# Download streamer thumbnail when marked as new
+download_new_streamer_thumb: True
+# How often to get new streamer thumbnails
+new_streamer_thumb_min: 60
+
 # Check for streamers online in the last week every minute,
 # online in the last month every 5 min, over a month 10 min
 online_check_sec:

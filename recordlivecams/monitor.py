@@ -45,6 +45,7 @@ class Streamer:
     is_recording: bool = False
     started_at: datetime = datetime.now()
     last_checked_at: datetime = datetime.now()
+    last_picture_at: datetime = datetime(1970, 1, 1)
 
 
 @dataclass
@@ -784,6 +785,7 @@ class Monitor:
         # Loop through the currently loaded streamers to find new ones
         streamers_to_add = []
         streamers_to_update = []
+        streamers_new = []
         for streamer in data:
             username = streamer["username"]
             # If they exist and have a database id
@@ -876,6 +878,12 @@ class Monitor:
                 if not found:
                     streamers_to_add.append(streamer)
 
+            # Check if they're new to the site and get their picture.
+            if ("is_new" in streamer and streamer["is_new"]) or (
+                "isNew" in streamer and streamer["isNew"]
+            ):
+                streamers_new.append(streamer)
+
         self.logger.debug(f"{len(streamers_to_add)} streamers to add")
         self.logger.debug(f"{len(streamers_to_update)} streamers to update")
 
@@ -926,16 +934,15 @@ class Monitor:
         )
         conn.commit()
 
-        # For new streamers, get a picture of them
-        self._get_thumbnail(streamers_to_add, site_name)
+        if self.config.get("download_streamer_thumb", False):
+            # Get a picture of any streamer we've seen for the first time
+            self._get_thumbnail(streamers_to_add, site_name)
 
-    def _get_thumbnail(self, streamers, site):
-        if (
-            "download_streamer_thumb" not in self.config
-            or not self.config["download_streamer_thumb"]
-        ):
-            return
+        if self.config.get("download_new_streamer_thumb", False):
+            # Get a picture for all streamers marked as new
+            self._get_new_thumbnail(streamers_new, site_name)
 
+    def _get_thumbnail(self, streamers, site, is_new=False):
         for streamer in streamers:
             json_url = None
 
@@ -968,11 +975,15 @@ class Monitor:
 
             thumb_url = urlparse(json_url.replace("\\", ""))
             name_path = Path(unquote(thumb_url.path))
-            prefix = streamer["username"][0].lower()
-            if not prefix.isalpha():
-                prefix = "#"
 
-            folder = self.streamers_path / prefix
+            if is_new:
+                folder = self.streamers_path / "new"
+            else:
+                prefix = streamer["username"][0].lower()
+                if not prefix.isalpha():
+                    prefix = "#"
+                folder = self.streamers_path / prefix
+
             folder.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%y-%m-%d-%H%M")
             thumb_path = (
@@ -989,6 +1000,20 @@ class Monitor:
 
                 with open(thumb_path, "wb") as handle:
                     handle.write(img_data)
+
+    def _get_new_thumbnail(self, streamers, site):
+        # Only get those we need new thumbs for
+        streamers_to_get = []
+        for streamer in streamers:
+            if self.streamers[
+                streamer["username"]
+            ].last_picture_at < datetime.now() - timedelta(
+                minutes=self.config["new_streamer_thumb_min"]
+            ):
+                streamers_to_get.append(streamer)
+
+        self.logger.debug(f"Getting new thumbs for {len(streamers_to_get)} streamers")
+        self._get_thumbnail(streamers_to_get, site, True)
 
     def run(self):
         while self.running:
