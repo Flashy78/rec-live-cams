@@ -812,9 +812,7 @@ class Monitor:
                 # Are they missing a record for this site?
                 if site_name not in self.streamers[username].sites:
                     # Site assigned id instead of username
-                    site_id = "NULL"
-                    if "id" in streamer:
-                        site_id = streamer["id"]
+                    site_id = streamer.get("id", "NULL")
 
                     run_sql(
                         """
@@ -864,9 +862,7 @@ class Monitor:
                             # Create a streamer_site record for them
                             if not existing_streamer.sites[site_name].is_in_db:
                                 # Site assigned id instead of username
-                                site_id = "NULL"
-                                if "id" in streamer:
-                                    site_id = streamer["id"]
+                                site_id = streamer.get("id", "NULL")
 
                                 streamers = run_sql(
                                     """
@@ -891,9 +887,7 @@ class Monitor:
                     streamers_to_add.append(streamer)
 
             # Check if they're new to the site and get their picture.
-            if ("is_new" in streamer and streamer["is_new"]) or (
-                "isNew" in streamer and streamer["isNew"]
-            ):
+            if streamer.get("is_new", False) or streamer.get("isNew", False):
                 streamers_new.append(streamer)
 
         self.logger.debug(f"{len(streamers_to_add)} streamers to add")
@@ -931,9 +925,7 @@ class Monitor:
                 )
 
             # Site assigned id instead of username
-            site_id = "NULL"
-            if "id" in streamer:
-                site_id = f"'{streamer['id']}'"
+            site_id = streamer.get("id", "NULL")
 
             c.execute(
                 f"INSERT INTO streamer_sites (streamer_id, name, site_id, site_name) VALUES ({c.lastrowid}, \"{streamer['username']}\", {site_id}, '{site_name}')"
@@ -958,27 +950,21 @@ class Monitor:
         for streamer in streamers:
             json_url = None
 
-            if site == "chaturbate" and "image_url" in streamer:
-                json_url = streamer["image_url"]
+            if site == "chaturbate":
+                json_url = streamer.get("image_url")
             elif site == "stripchat":
-                if "mlPreviewImage" not in streamer:
-                    json_url = streamer["snapshotUrl"]
-                else:
-                    json_url = streamer["mlPreviewImage"]
+                json_url = streamer.get("mlPreviewImage", streamer.get("snapshotUrl"))
             elif site == "bongacams":
                 if "profile_images" in streamer:
-                    if "thumbnail_image_big_live" in streamer["profile_images"]:
-                        json_url = streamer["profile_images"][
-                            "thumbnail_image_big_live"
-                        ]
-                    elif "thumbnail_image_medium_live" in streamer["profile_images"]:
-                        json_url = streamer["profile_images"][
-                            "thumbnail_image_medium_live"
-                        ]
-                    elif "thumbnail_image_small_live" in streamer["profile_images"]:
-                        json_url = streamer["profile_images"][
-                            "thumbnail_image_small_live"
-                        ]
+                    json_url = streamer["profile_images"].get(
+                        "thumbnail_image_big_live",
+                        streamer["profile_images"].get(
+                            "thumbnail_image_medium_live",
+                            streamer["profile_images"].get(
+                                "thumbnail_image_small_live"
+                            ),
+                        ),
+                    )
                 if json_url:
                     json_url = json_url.replace("//", "https://")
 
