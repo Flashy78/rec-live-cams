@@ -1,3 +1,7 @@
+cvlib
+dlib
 ffmpeg-python
+opencv-contrib-python
 pyyaml
 streamlink
+tensorflow

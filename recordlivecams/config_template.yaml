@@ -29,6 +29,8 @@ max_recording_min: 59
 # normally if there are a bunch of files in the to_process folder, or if starting back up after
 # an unexpected shutdown.
 process_files_at_once: 2
+# How many face detection processes to run at once.
+detect_faces_at_once: 6
 # vcsi seems to have a bug where it doesn't always clean up temp files and can slowly fill up the
 # docker container. This should be high enough so it doesn't try and delete any temp files that
 # are currently in use.

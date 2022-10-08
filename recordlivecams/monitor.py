@@ -4,6 +4,8 @@ import shutil
 import signal
 import subprocess
 import time
+import multiprocessing as mp
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +21,7 @@ import yaml
 
 from recordlivecams.database.common import get_conn, run_sql, set_db_path
 from recordlivecams.processes import check_who_is_online
+from recordlivecams.face_detector import cnn, cvlib
 
 _version = "1.0.0"
 
@@ -83,6 +86,12 @@ class Monitor:
         self.video_path_failed.mkdir(parents=True, exist_ok=True)
         self.streamers_path = video_path / "streamers"
         self.streamers_path.mkdir(parents=True, exist_ok=True)
+        self.streamer_thumb_path = video_path / "streamer_thumbnails" / "first_seen_online"
+        self.streamer_thumb_path.mkdir(parents=True, exist_ok=True)
+        self.streamer_new_thumb_path = video_path / "streamer_thumbnails" / "new"
+        self.streamer_new_thumb_path.mkdir(parents=True, exist_ok=True)
+        self.streamer_new_couple_thumb_path = video_path / "streamer_thumbnails" / "new_couple"
+        self.streamer_new_couple_thumb_path.mkdir(parents=True, exist_ok=True)
 
         self.db_path = config_path / "db.sqlite3"
         set_db_path(self.db_path)
@@ -107,6 +116,11 @@ class Monitor:
         for file in self.video_path_in_progress.glob("*"):
             file.rename(self.video_path_to_process / file.name)
 
+        threads = self.config.get("detect_faces_at_once", 2)
+        if threads > 60 or threads > mp.cpu_count():
+            self.logger.info(f"Face detection threads must be less than 61 or at most {mp.cpu_count()}")
+        self.mp_pool = mp.Pool(threads)
+
         self.streamlink = streamlink.Streamlink()
         plugin_count = len(self.streamlink.plugins)
         self.logger.debug("Side loading Streamlink plugins")
@@ -124,6 +138,7 @@ class Monitor:
             self.logger.info("Caught stop signal, stopping all recordings")
             self.running = False
             self.shutting_down = True
+            self.mp_pool.close()
 
             for process in self.processes.values():
                 # Send sigint, wait for end
@@ -172,7 +187,7 @@ class Monitor:
                 shutil.copy(self.config_template_path, self.config_path)
 
             modified_at = self.config_path.stat().st_mtime
-            if self.config_timestamp and self.config_timestamp == modified_at:
+            if self.config_timestamp == modified_at:
                 return None
             else:
                 self.config_timestamp = modified_at
@@ -182,7 +197,7 @@ class Monitor:
                 return yaml.safe_load(f)
 
         except Exception as e:
-            print(e)
+            self.logger.exception("Error loading config")
             return None
 
     def _reload_config(self, check_if_new_streamers_online=True):
@@ -975,12 +990,12 @@ class Monitor:
             name_path = Path(unquote(thumb_url.path))
 
             if is_new:
-                folder = self.streamers_path / "new"
+                folder = self.streamer_new_thumb_path
             else:
                 prefix = streamer["username"][0].lower()
                 if not prefix.isalpha():
                     prefix = "#"
-                folder = self.streamers_path / prefix
+                folder = self.streamer_thumb_path / prefix
 
             folder.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%y-%m-%d-%H%M")
@@ -998,6 +1013,13 @@ class Monitor:
 
                 with open(thumb_path, "wb") as handle:
                     handle.write(img_data)
+                
+                if is_new:
+                    self.mp_pool.apply_async(
+                        cvlib.detect_faces,
+                        #cnn.detect_faces,
+                        args=(streamer["username"], thumb_path, self.streamer_new_thumb_path, self.streamer_new_couple_thumb_path)
+                    )
 
     def _get_new_thumbnail(self, streamers, site):
         # Only get those we need new thumbs for
@@ -1053,6 +1075,7 @@ class Monitor:
                 time.sleep(1)
 
         # self._stop_gracefully()
+        self.mp_pool.close()
         conn = get_conn()
         conn.close()
         self.logger.info("Fully stopped")
