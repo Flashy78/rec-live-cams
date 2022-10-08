@@ -86,11 +86,15 @@ class Monitor:
         self.video_path_failed.mkdir(parents=True, exist_ok=True)
         self.streamers_path = video_path / "streamers"
         self.streamers_path.mkdir(parents=True, exist_ok=True)
-        self.streamer_thumb_path = video_path / "streamer_thumbnails" / "first_seen_online"
+        self.streamer_thumb_path = (
+            video_path / "streamer_thumbnails" / "first_seen_online"
+        )
         self.streamer_thumb_path.mkdir(parents=True, exist_ok=True)
         self.streamer_new_thumb_path = video_path / "streamer_thumbnails" / "new"
         self.streamer_new_thumb_path.mkdir(parents=True, exist_ok=True)
-        self.streamer_new_couple_thumb_path = video_path / "streamer_thumbnails" / "new_couple"
+        self.streamer_new_couple_thumb_path = (
+            video_path / "streamer_thumbnails" / "new_couple"
+        )
         self.streamer_new_couple_thumb_path.mkdir(parents=True, exist_ok=True)
 
         self.db_path = config_path / "db.sqlite3"
@@ -118,7 +122,9 @@ class Monitor:
 
         threads = self.config.get("detect_faces_at_once", 2)
         if threads > 60 or threads > mp.cpu_count():
-            self.logger.info(f"Face detection threads must be less than 61 or at most {mp.cpu_count()}")
+            self.logger.info(
+                f"Face detection threads must be less than 61 or at most {mp.cpu_count()}"
+            )
         self.mp_pool = mp.Pool(threads)
 
         self.streamlink = streamlink.Streamlink()
@@ -901,8 +907,10 @@ class Monitor:
                 if not found:
                     streamers_to_add.append(streamer)
 
-            # Check if they're new to the site and get their picture.
-            if streamer.get("is_new", False) or streamer.get("isNew", False):
+            # Check if they're new to the site and we don't watch them, get their picture.
+            if (streamer.get("is_new", False) or streamer.get("isNew", False)) and (
+                username in self.streamers and not self.streamers[username].watch
+            ):
                 streamers_new.append(streamer)
 
         self.logger.debug(f"{len(streamers_to_add)} streamers to add")
@@ -1013,12 +1021,17 @@ class Monitor:
 
                 with open(thumb_path, "wb") as handle:
                     handle.write(img_data)
-                
+
                 if is_new:
                     self.mp_pool.apply_async(
                         cvlib.detect_faces,
-                        #cnn.detect_faces,
-                        args=(streamer["username"], thumb_path, self.streamer_new_thumb_path, self.streamer_new_couple_thumb_path)
+                        # cnn.detect_faces,
+                        args=(
+                            streamer["username"],
+                            thumb_path,
+                            self.streamer_new_thumb_path,
+                            self.streamer_new_couple_thumb_path,
+                        ),
                     )
 
     def _get_new_thumbnail(self, streamers, site):

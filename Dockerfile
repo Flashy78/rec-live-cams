@@ -10,8 +10,8 @@ RUN apt update && \
     apt -t bullseye-backports install -y streamlink && \
     rm -rf /var/lib/apt/lists/*
 
-# Install vcsi
-RUN pip3 install vcsi
+# Install cmake and vcsi
+RUN pip3 install cmake vcsi
 
 RUN mkdir -p /app/download && \
     mkdir /app/config
