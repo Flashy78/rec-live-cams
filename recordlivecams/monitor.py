@@ -21,7 +21,7 @@ import yaml
 
 from recordlivecams.database.common import get_conn, run_sql, set_db_path
 from recordlivecams.processes import check_who_is_online
-from recordlivecams.face_detector import cnn, cvlib
+from recordlivecams.face_detector import cvlib
 
 _version = "1.0.0"
 
@@ -46,7 +46,16 @@ class Streamer:
     sites: Dict[str, Streamer_Site]
     watch: bool = False
     is_recording: bool = False
+    # When did the current recording start
     started_at: datetime = datetime.now()
+    # Stored in the db for the first time they were online.
+    first_online: datetime = datetime.now()
+    # Stored in the db from the last time they were online.
+    last_online: datetime = datetime.now()
+    # Reset each time the app is restarted: how many times have we seen them online (only counts once per 24h)?
+    times_online: int = 1
+    # For the site polling feature to make sure they aren't checked very often when
+    # they haven't been seen online in a long time.
     last_checked_at: datetime = datetime.now()
     last_picture_at: datetime = datetime(1970, 1, 1)
 
@@ -84,8 +93,6 @@ class Monitor:
         self.video_path_to_process.mkdir(parents=True, exist_ok=True)
         self.video_path_failed = video_path / "failed"
         self.video_path_failed.mkdir(parents=True, exist_ok=True)
-        self.streamers_path = video_path / "streamers"
-        self.streamers_path.mkdir(parents=True, exist_ok=True)
         self.streamer_thumb_path = (
             video_path / "streamer_thumbnails" / "first_seen_online"
         )
@@ -161,29 +168,6 @@ class Monitor:
                 process["process"].send_signal(signal.SIGINT)
                 process["process"].wait()
 
-    def _get_streamer_path(self, name) -> Path:
-        return self.streamers_path / f"{name}.txt"
-
-    def _load_streamer_file(self, name) -> datetime:
-        """Load a streamer file which should contain the last time they were seen online"""
-        streamer_path = self._get_streamer_path(name)
-        if streamer_path.is_file():
-            with open(streamer_path, "r") as f:
-                date_text = f.read()
-        else:
-            # They're new, give them a starting file
-            date_text = self._save_streamer_file(name)
-
-        return datetime.strptime(date_text, "%y-%m-%d-%H%M")
-
-    def _save_streamer_file(self, name) -> None:
-        """Update a streamer file to indicate they were seen online now"""
-        streamer_path = self._get_streamer_path(name)
-        date_text = datetime.now().strftime("%y-%m-%d-%H%M")
-        with open(streamer_path, "w") as f:
-            f.write(date_text)
-        return date_text
-
     def _load_config(self) -> Any:
         # opens file, returns json dict, returns None if error
         try:
@@ -227,6 +211,7 @@ class Monitor:
 
             # Update all other streamers
             for name, sites in self.config["streamers"].items():
+                # If they are brand new
                 if name not in self.streamers.keys():
                     self.logger.warning(f"Streamer {name} not found in the database")
                     # Create the in memory record for them, with no id
@@ -246,7 +231,6 @@ class Monitor:
                     self.streamers[name] = Streamer(
                         id=None, name=name, sites=streamer_sites, watch=True
                     )
-                    self.streamers[name].started_at = self._load_streamer_file(name)
 
                     if check_if_new_streamers_online:
                         # Newly added, so let's immediately check if they're online
@@ -257,6 +241,7 @@ class Monitor:
 
                     added.append(name)
                 else:
+                    # TODO: If they get a new username from a diff site in the config, how to add it?
                     self.streamers[name].watch = True
 
                     # Remove any primary sites that are assigned
@@ -366,8 +351,6 @@ class Monitor:
         self.video_path_in_progress.mkdir(parents=True, exist_ok=True)
         filename = str(self.video_path_in_progress / f"{name}-{timestamp}-{site}.mp4")
         self.logger.debug(f"Saving to {filename}")
-
-        self._save_streamer_file(name)
 
         username = self.streamers[name].sites[site].streamer_name
         url = self.sites[site].url.replace("{username}", username)
@@ -743,8 +726,10 @@ class Monitor:
         """Load the streamers from the database"""
         streamers = run_sql(
             """
-            SELECT streamer_sites.streamer_id, streamer_sites.name, streamer_sites.is_primary, streamer_sites.site_name
-            FROM streamer_sites;
+            SELECT  streamer.id, streamer.first_online, streamer.last_online,
+                    streamer_sites.name, streamer_sites.is_primary, streamer_sites.site_name
+            FROM streamer_sites
+            JOIN streamer ON streamer.id = streamer_sites.streamer_id;
             """
         )
 
@@ -752,7 +737,9 @@ class Monitor:
         for streamer in streamers:
             if streamer["is_primary"]:
                 self.streamers[streamer["name"]] = Streamer(
-                    id=streamer["streamer_id"],
+                    id=streamer["id"],
+                    first_online=streamer["first_online"],
+                    last_online=streamer["last_online"],
                     name=streamer["name"],
                     sites={
                         streamer["site_name"]: Streamer_Site(
@@ -768,7 +755,7 @@ class Monitor:
         # Now we can add the non-primary streamers to their existing entry
         for non_primary_streamer in non_primary_streamers:
             for streamer in self.streamers.values():
-                if streamer.id == non_primary_streamer["streamer_id"]:
+                if streamer.id == non_primary_streamer["id"]:
                     streamer.sites[non_primary_streamer["site_name"]] = Streamer_Site(
                         site_name=non_primary_streamer["site_name"],
                         streamer_name=non_primary_streamer["name"],
@@ -829,6 +816,7 @@ class Monitor:
                         self.streamers[username].id,
                     )
                 )
+                self._update_online_count(self.streamers[username])
 
                 # Are they missing a record for this site?
                 if site_name not in self.streamers[username].sites:
@@ -879,6 +867,7 @@ class Monitor:
                                     existing_streamer.id,
                                 )
                             )
+                            self._update_online_count(existing_streamer)
 
                             # Create a streamer_site record for them
                             if not existing_streamer.sites[site_name].is_in_db:
@@ -907,11 +896,14 @@ class Monitor:
                 if not found:
                     streamers_to_add.append(streamer)
 
-            # Check if they're new to the site and we don't watch them, get their picture.
-            if (streamer.get("is_new", False) or streamer.get("isNew", False)) and (
-                username in self.streamers and not self.streamers[username].watch
-            ):
-                streamers_new.append(streamer)
+            # Check if we consider them new and we don't watch them, get their picture.
+            # if streamer.get("is_new", False) or streamer.get("isNew", False):
+            if self._is_streamer_new(streamer):
+                if username in self.streamers:
+                    if not self.streamers[username].watch:
+                        streamers_new.append(streamer)
+                else:
+                    streamers_new.append(streamer)
 
         self.logger.debug(f"{len(streamers_to_add)} streamers to add")
         self.logger.debug(f"{len(streamers_to_update)} streamers to update")
@@ -969,8 +961,37 @@ class Monitor:
             # Get a picture for all streamers marked as new
             self._get_new_thumbnail(streamers_new, site_name)
 
+    def _update_online_count(self, streamer):
+        """Update the in memory count of how many times they've been online"""
+        # Did we last see them over 24 hours ago?
+        if streamer.last_online < datetime.now() - timedelta(days=1):
+            streamer.last_online = datetime.now()
+            streamer.times_online += 1
+
+    def _is_streamer_new(self, streamer):
+        """Find out if we consider a streamer as new."""
+        # Have we not seen them before?
+        if streamer["username"] not in self.streamers:
+            return True
+        # If first_online is longer than days_since_first_seen days ago, Not New
+        elif self.streamers[
+            streamer["username"]
+        ].first_online < datetime.now() - timedelta(
+            days=self.config["days_since_first_seen"]
+        ):
+            return False
+        # How many times have we seen them, if more than no_longer_new, Not New
+        elif (
+            self.streamers[streamer["username"]].times_online
+            > self.config["no_longer_new"]
+        ):
+            return False
+
+        return True
+
     def _get_thumbnail(self, streamers, site, is_new=False):
         for streamer in streamers:
+            username = streamer["username"]
             json_url = None
 
             if site == "chaturbate":
@@ -998,9 +1019,11 @@ class Monitor:
             name_path = Path(unquote(thumb_url.path))
 
             if is_new:
-                folder = self.streamer_new_thumb_path
+                folder = self.streamer_new_thumb_path / str(
+                    self.streamers[username].times_online
+                )
             else:
-                prefix = streamer["username"][0].lower()
+                prefix = username[0].lower()
                 if not prefix.isalpha():
                     prefix = "#"
                 folder = self.streamer_thumb_path / prefix
@@ -1009,7 +1032,7 @@ class Monitor:
             timestamp = datetime.now().strftime("%y-%m-%d-%H%M")
             thumb_path = (
                 folder
-                / f"{streamer['username']}-{timestamp}-{site}{name_path.suffix if name_path.suffix else '.jpg'}"
+                / f"{username}-{timestamp}-{site}{name_path.suffix if name_path.suffix else '.jpg'}"
             )
 
             resp = requests.get(thumb_url.geturl())
@@ -1023,11 +1046,16 @@ class Monitor:
                     handle.write(img_data)
 
                 if is_new:
+                    # cvlib.detect_faces(
+                    #     username,
+                    #     thumb_path,
+                    #     self.streamer_new_thumb_path,
+                    #     self.streamer_new_couple_thumb_path,
+                    # )
                     self.mp_pool.apply_async(
                         cvlib.detect_faces,
-                        # cnn.detect_faces,
                         args=(
-                            streamer["username"],
+                            username,
                             thumb_path,
                             self.streamer_new_thumb_path,
                             self.streamer_new_couple_thumb_path,

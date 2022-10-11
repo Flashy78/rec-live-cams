@@ -31,11 +31,11 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
         # Should we skip this streamer because they haven't been online in a long
         # time and we've recently checked their online status?
         diff_in_sec = datetime.now() - streamer.last_checked_at
-        if streamer.started_at > last_week:
+        if streamer.last_online > last_week:
             sec_to_sleep = (
                 config["online_check_sec"]["in_last_week"] - diff_in_sec.total_seconds()
             )
-        elif streamer.started_at > last_month:
+        elif streamer.last_online > last_month:
             sec_to_sleep = (
                 config["online_check_sec"]["in_last_month"]
                 - diff_in_sec.total_seconds()
@@ -84,6 +84,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
                 )
 
             if len(streams) > 1:
+                streamer.last_online = datetime.now()
                 start_recording_q.put((streamer.name, site))
                 break
 

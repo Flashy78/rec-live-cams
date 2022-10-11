@@ -13,7 +13,9 @@ def set_db_path(db_path_in: Path):
 def get_conn():
     global _conn
     if not _conn:
-        _conn = sqlite3.Connection(db_path)
+        _conn = sqlite3.Connection(
+            db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+        )
         # Apparently you need to enable this pragma per connection:
         _conn.cursor().execute("PRAGMA foreign_keys = ON;")
         _conn.row_factory = sqlite3.Row

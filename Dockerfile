@@ -13,13 +13,13 @@ RUN apt update && \
 # Install cmake and vcsi
 RUN pip3 install cmake vcsi
 
+RUN pip3 install cvlib ffmpeg-python opencv-contrib-python pyyaml streamlink tensorflow
+
 RUN mkdir -p /app/download && \
     mkdir /app/config
 
 ADD ./plugins /app/plugins
 ADD ./recordlivecams /app/recordlivecams
-
-RUN pip3 install -r /app/recordlivecams/requirements.txt
 
 WORKDIR /app
 

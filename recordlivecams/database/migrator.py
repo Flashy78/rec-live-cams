@@ -2,6 +2,7 @@
 
 import datetime
 import subprocess
+import shutil
 from importlib import resources
 from pathlib import Path
 
@@ -78,9 +79,14 @@ def migrate(logger, db_path: Path, overwrite_latest_schema=False):
         current_version = _get_current_version()
         if current_version != 0:
             now = datetime.datetime.utcnow().isoformat("T", "milliseconds")
-            backup_filename = f"db_backup_v{current_version}_{now}.sqlite3"
-            logger.info(f"Backup up to {backup_filename}...", end="")
-            cursor.execute("VACUUM main INTO ?;", (backup_filename,))
+            backup_filename = (
+                db_path.parent / f"db_backup_v{current_version}_{now}.sqlite3"
+            )
+            logger.info(f"Backup up to {backup_filename}...")
+            # TODO: Why does this not work?
+            # cursor.execute("VACUUM main INTO ?;", (str(backup_filename),))
+            # TODO: Instead make a backup
+            shutil.copy(db_path, backup_filename)
             logger.info("done")
 
         # Start migrations

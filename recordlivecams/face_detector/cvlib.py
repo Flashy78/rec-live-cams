@@ -12,8 +12,10 @@ def detect_faces(
     faces, confidences = cv.detect_face(image)
 
     if len(faces) >= 2:
+        move_to_folder = new_folder / image_path.parent.name
+        move_to_folder.mkdir(parents=True, exist_ok=True)
         # Move all images from that streamer into a different folder
-        for file in thumb_folder.glob(f"{username}-*"):
-            file.rename(new_folder / file.name)
+        for file in thumb_folder.rglob(f"**/{username}-*"):
+            file.rename(move_to_folder / file.name)
 
     return faces
