@@ -1057,6 +1057,8 @@ class Monitor:
 
                 with open(thumb_path, "wb") as handle:
                     handle.write(img_data)
+                # There some bug where binary files are not getting correct permissions
+                thumb_path.chmod(0o0777)
 
                 if is_new:
                     # cvlib.detect_faces(
