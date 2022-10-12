@@ -783,8 +783,10 @@ class Monitor:
             ) as f:
                 data = json.load(f)
             """
-
-        except requests.exceptions.RequestException as e:
+        except (
+            requests.exceptions.RequestException,
+            json.decoder.JSONDecodeError,
+        ) as e:
             self.logger.exception(f"{site_name} Error")
             return
 
