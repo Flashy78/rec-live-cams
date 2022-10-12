@@ -52,8 +52,8 @@ class Streamer:
     first_online: datetime = datetime.now()
     # Stored in the db from the last time they were online.
     last_online: datetime = datetime.now()
-    # Reset each time the app is restarted: how many times have we seen them online (only counts once per 24h)?
-    times_online: int = 1
+    # Stored in the db how many times have we seen them online (only counts once per 24h)?
+    days_online: int = 1
     # For the site polling feature to make sure they aren't checked very often when
     # they haven't been seen online in a long time.
     last_checked_at: datetime = datetime.now()
@@ -726,7 +726,7 @@ class Monitor:
         """Load the streamers from the database"""
         streamers = run_sql(
             """
-            SELECT  streamer.id, streamer.first_online, streamer.last_online,
+            SELECT  streamer.id, streamer.first_online, streamer.last_online, streamer.days_online,
                     streamer_sites.name, streamer_sites.is_primary, streamer_sites.site_name
             FROM streamer_sites
             JOIN streamer ON streamer.id = streamer_sites.streamer_id;
@@ -740,6 +740,7 @@ class Monitor:
                     id=streamer["id"],
                     first_online=streamer["first_online"],
                     last_online=streamer["last_online"],
+                    days_online=streamer["days_online"],
                     name=streamer["name"],
                     sites={
                         streamer["site_name"]: Streamer_Site(
@@ -810,13 +811,17 @@ class Monitor:
 
             # If they exist and have a database id
             if username in self.streamers and self.streamers[username].id:
+                counter = 0
+                if self._update_online_count(username):
+                    counter = 1
+
                 streamers_to_update.append(
                     (
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        counter,
                         self.streamers[username].id,
                     )
                 )
-                self._update_online_count(self.streamers[username])
 
                 # Are they missing a record for this site?
                 if site_name not in self.streamers[username].sites:
@@ -861,13 +866,18 @@ class Monitor:
                     if existing_streamer.id and site_name in existing_streamer.sites:
                         if existing_streamer.sites[site_name].streamer_name == username:
                             found = True
+
+                            counter = 0
+                            if self._update_online_count(existing_streamer.name):
+                                counter = 1
+
                             streamers_to_update.append(
                                 (
                                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    counter,
                                     existing_streamer.id,
                                 )
                             )
-                            self._update_online_count(existing_streamer)
 
                             # Create a streamer_site record for them
                             if not existing_streamer.sites[site_name].is_in_db:
@@ -914,7 +924,7 @@ class Monitor:
         for streamer in streamers_to_add:
             username = streamer["username"]
             c.execute(
-                f"INSERT INTO streamer (first_online) VALUES ('{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}')"
+                f"INSERT INTO streamer (first_online, days_online) VALUES ('{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}', 1)"
             )
             # Create/Update the in memory record for them
             if username in self.streamers:
@@ -949,7 +959,8 @@ class Monitor:
 
         # Update everyone's last seen to now
         c.executemany(
-            "UPDATE streamer SET last_online = ? WHERE id = ?", streamers_to_update
+            "UPDATE streamer SET last_online = ?, days_online = days_online + ? WHERE id = ?",
+            streamers_to_update,
         )
         conn.commit()
 
@@ -961,12 +972,14 @@ class Monitor:
             # Get a picture for all streamers marked as new
             self._get_new_thumbnail(streamers_new, site_name)
 
-    def _update_online_count(self, streamer):
+    def _update_online_count(self, username):
         """Update the in memory count of how many times they've been online"""
         # Did we last see them over 24 hours ago?
-        if streamer.last_online < datetime.now() - timedelta(days=1):
-            streamer.last_online = datetime.now()
-            streamer.times_online += 1
+        if self.streamers[username].last_online < datetime.now() - timedelta(days=1):
+            self.streamers[username].last_online = datetime.now()
+            self.streamers[username].days_online += 1
+            return True
+        return False
 
     def _is_streamer_new(self, streamer):
         """Find out if we consider a streamer as new."""
@@ -982,8 +995,8 @@ class Monitor:
             return False
         # How many times have we seen them, if more than no_longer_new, Not New
         elif (
-            self.streamers[streamer["username"]].times_online
-            > self.config["no_longer_new"]
+            self.streamers[streamer["username"]].days_online
+            > self.config["no_longer_new_days"]
         ):
             return False
 
@@ -1020,7 +1033,7 @@ class Monitor:
 
             if is_new:
                 folder = self.streamer_new_thumb_path / str(
-                    self.streamers[username].times_online
+                    self.streamers[username].days_online
                 )
             else:
                 prefix = username[0].lower()
