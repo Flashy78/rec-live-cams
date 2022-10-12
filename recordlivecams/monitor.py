@@ -907,7 +907,6 @@ class Monitor:
                     streamers_to_add.append(streamer)
 
             # Check if we consider them new and we don't watch them, get their picture.
-            # if streamer.get("is_new", False) or streamer.get("isNew", False):
             if self._is_streamer_new(streamer):
                 if username in self.streamers:
                     if not self.streamers[username].watch:
@@ -983,6 +982,11 @@ class Monitor:
 
     def _is_streamer_new(self, streamer):
         """Find out if we consider a streamer as new."""
+        if self.config["use_is_new_flag"]:
+            if streamer.get("is_new", False) or streamer.get("isNew", False):
+                return True
+            return False
+
         # Have we not seen them before?
         if streamer["username"] not in self.streamers:
             return True

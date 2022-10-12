@@ -8,6 +8,8 @@ vcsi_options: "--show-timestamp --width 1920 --grid 8x0 --start-delay-percent 0 
 download_streamer_thumb: True
 # Download streamer thumbnail when marked as new
 download_new_streamer_thumb: True
+# Use the site is new flag instead of the custom time periods below
+use_is_new_flag: True
 # How many times to stream before no longer considering a streamer new
 no_longer_new_days: 11
 # Don't consider them as new if they were first seen more than this many days ago
