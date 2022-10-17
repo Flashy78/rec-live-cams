@@ -245,16 +245,17 @@ class Monitor:
                     self.streamers[name].watch = True
 
                     # Remove any primary sites that are assigned
-                    for site, site_name in sites.items():
-                        if (
-                            site_name != name
-                            and site in self.streamers[name].sites
-                            and self.streamers[name].sites[site].is_primary
-                        ):
-                            sites = run_sql(
-                                "UPDATE streamer_sites SET is_primary = 0 WHERE streamer_id = ? AND site_name = ?;",
-                                (self.streamers[name].id, site),
-                            )
+                    if sites:
+                        for site, site_name in sites.items():
+                            if (
+                                site_name != name
+                                and site in self.streamers[name].sites
+                                and self.streamers[name].sites[site].is_primary
+                            ):
+                                sites = run_sql(
+                                    "UPDATE streamer_sites SET is_primary = 0 WHERE streamer_id = ? AND site_name = ?;",
+                                    (self.streamers[name].id, site),
+                                )
 
             if removed:
                 self.logger.info(
