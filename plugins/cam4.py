@@ -20,7 +20,7 @@ class Cam4(Plugin):
                     "playerUrl": validate.url(),
                     "flashVars": validate.Schema(
                         {
-                            "videoPlayUrl": validate.text,
+                            "videoPlayUrl": str,
                             "videoAppUrl": validate.url(scheme="rtmp"),
                         }
                     ),

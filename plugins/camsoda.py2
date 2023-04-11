@@ -12,10 +12,10 @@ _url_re = re.compile(r"http(s)?://(www\.)?camsoda\.com/(?P<username>[^\"\']+)")
 
 _api_user_schema = validate.Schema(
     {
-        "status": validate.any(int, validate.text),
+        "status": validate.any(int, str),
         validate.optional("user"): validate.Schema({
             "chat": validate.Schema ({
-                    "status": validate.any(int, validate.text)
+                    "status": validate.any(int, str)
             })
         })
     }
@@ -23,9 +23,9 @@ _api_user_schema = validate.Schema(
 
 _api_video_schema = validate.Schema(
     {
-        "token": validate.text,
-        "edge_servers": [validate.text],
-        "stream_name": validate.text
+        "token": str,
+        "edge_servers": [str],
+        "stream_name": str
     }
 )
 

@@ -13,12 +13,12 @@ _post_schema = validate.Schema(
     {
         "cam": validate.Schema(
             {
-                "streamName": validate.text,
-                "viewServers": validate.Schema({"flashphoner-hls": validate.text}),
+                "streamName": str,
+                "viewServers": validate.Schema({"flashphoner-hls": str}),
             }
         ),
         "user": validate.Schema(
-            {"user": validate.Schema({"status": validate.text, "isLive": bool})}
+            {"user": validate.Schema({"status": str, "isLive": bool})}
         ),
     }
 )

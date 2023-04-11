@@ -9,9 +9,7 @@ API_HLS = "https://chaturbate.com/get_edge_hls_url_ajax/"
 
 _url_re = re.compile(r"https?://(\w+\.)?chaturbate\.com/(?P<username>\w+)")
 
-_post_schema = validate.Schema(
-    {"url": validate.text, "room_status": validate.text, "success": int}
-)
+_post_schema = validate.Schema({"url": str, "room_status": str, "success": int})
 
 
 @pluginmatcher(re.compile(r"https?://(\w+\.)?chaturbate\.com/(?P<username>\w+)"))

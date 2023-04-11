@@ -46,7 +46,7 @@ class MyFreeCams(Plugin):
 
     _data_schema = validate.Schema(
         {
-            "nm": validate.text,
+            "nm": str,
             "sid": int,
             "uid": int,
             "vs": int,
