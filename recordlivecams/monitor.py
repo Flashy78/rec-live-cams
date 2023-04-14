@@ -433,7 +433,23 @@ class Monitor:
                     self.logger.info(
                         f"{name} has been recording for over {self.config['max_recording_min']} min, restarting"
                     )
-                    self._stop_recording_process(name, True)
+
+                    # Check if they are available to restart
+                    is_online = False
+                    if name in self.streamers:
+                        for site in self.streamers[name].sites:
+                            if self._is_online(name, site):
+                                is_online = True
+                                break
+
+                    if is_online:
+                        self._stop_recording_process(name, True)
+                    else:
+                        # Reset the timer for them since we wouldn't be able to start a new recording
+                        self.logger.info(
+                            f"Unable to find a new stream for {name}, restarting the timer instead"
+                        )
+                        self.streamers[name].started_at = datetime.now()
 
     def _is_video_incorrect_length(self, video_path: Path) -> bool:
         """Returns true if video is over max_recording_min + 10"""
@@ -503,14 +519,16 @@ class Monitor:
 
         if run_copy_job:
             self.logger.debug(f"Running ffmpeg copy on {video_path}")
+            stream = (
+                ffmpeg.input(str(video_path), **self.config.get("ffmpeg_options", {}))
+                .output(video_path_out, c="copy")
+                .overwrite_output()
+            )
+            self.logger.debug(ffmpeg.compile(stream))
+
             self.index_processes[str(video_path)] = {
                 "started_at": datetime.now(),
-                "process": (
-                    ffmpeg.input(str(video_path))
-                    .output(video_path_out, c="copy")
-                    .overwrite_output()
-                    .run_async(quiet=True)
-                ),
+                "process": ffmpeg.run_async(stream, quiet=True),
             }
 
     def _check_index_video_processes(self):
@@ -556,7 +574,9 @@ class Monitor:
                     self.logger.debug(
                         f"After indexing: {new_file.name} changed {percent_changed}%"
                     )
-                    if percent_changed < 20:
+                    if percent_changed < self.config.get(
+                        "file_size_percent_change", 20
+                    ):
                         try:
                             new_file.replace(video_path)
                         except Exception as e:
@@ -1041,7 +1061,7 @@ class Monitor:
             if is_new:
                 folder = self.streamer_new_thumb_path / str(
                     self.streamers[username].days_online
-                )
+                ).zfill(4)
             else:
                 prefix = username[0].lower()
                 if not prefix.isalpha():
