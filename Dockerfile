@@ -2,18 +2,20 @@ FROM python:3.10-bullseye
 
 ENV TZ=America/Los_Angeles
 
-# RUN apt-get update && apt-get install gosu
+# Download and install the latest git build of ffmpeg
+RUN mkdir /ffmpeg-temp && \
+    cd /ffmpeg-temp && \
+    wget https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz && \
+    tar xvf ffmpeg-git-amd64-static.tar.xz && \
+    rm ffmpeg-git-amd64-static.tar.xz && \
+    cd $(ls | head -1) && \
+    mv ffmpeg ffprobe /usr/bin/
 
-# If you don't have Debian backports already (see link below):
-RUN echo "deb http://deb.debian.org/debian bullseye-backports main" | tee "/etc/apt/sources.list.d/streamlink.list"
-RUN apt update && \
-    apt -t bullseye-backports install -y streamlink && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install cmake and vcsi
-RUN pip3 install cmake vcsi
-
-RUN pip3 install cvlib ffmpeg-python opencv-contrib-python pyyaml streamlink tensorflow
+RUN pip3 install pyyaml \
+    cmake vcsi \
+    streamlink \
+    ffmpeg-python \
+    cvlib opencv-contrib-python-headless tensorflow
 
 RUN mkdir -p /app/download && \
     mkdir /app/config
@@ -27,5 +29,4 @@ VOLUME /app/download
 VOLUME /app/config
 
 ENTRYPOINT ["python"]
-
 CMD ["-m", "recordlivecams.program"]

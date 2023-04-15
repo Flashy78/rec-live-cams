@@ -539,7 +539,7 @@ class Monitor:
 
             if process["process"].poll() is not None:
                 try:
-                    stdout, stderr = process["process"].communicate(timeout=15)
+                    stdout, stderr = process["process"].communicate(timeout=10)
                 except subprocess.TimeoutExpired:
                     process["process"].kill()
                     stdout, stderr = process["process"].communicate()
@@ -706,7 +706,7 @@ class Monitor:
             if not is_processing:
                 counter += 1
                 self.orphan_file_list.append(str(file))
-                if len(self.orphan_file_list) > 20:
+                if len(self.orphan_file_list) > 10:
                     self.orphan_file_list.pop(0)
                 self._index_video(file)
 
