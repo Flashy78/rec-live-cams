@@ -17,7 +17,7 @@ def detect_faces(
         # Double check with another model that this isn't a false positive
         # cnn_faces = cnn.detect_faces(image_path)
         image = load_image_file(str(image_path))
-        faces = face_locations(image, 0, model="cnn")
+        faces = face_locations(image, 1, model="cnn")
 
         if len(faces) >= 2:
             move_to_folder = new_folder / image_path.parent.name
