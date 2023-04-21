@@ -17,9 +17,9 @@ def detect_faces(
         # Double check with another model that this isn't a false positive
         # cnn_faces = cnn.detect_faces(image_path)
         image = load_image_file(str(image_path))
-        face_locations = face_locations(image, 0, model="cnn")
+        faces = face_locations(image, 0, model="cnn")
 
-        if len(face_locations) >= 2:
+        if len(faces) >= 2:
             move_to_folder = new_folder / image_path.parent.name
             move_to_folder.mkdir(parents=True, exist_ok=True)
             # Move all images from that streamer into a different folder
