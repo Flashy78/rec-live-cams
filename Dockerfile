@@ -11,11 +11,12 @@ RUN mkdir /ffmpeg-temp && \
     cd $(ls | head -1) && \
     mv ffmpeg ffprobe /usr/bin/
 
-RUN pip3 install pyyaml \
-    cmake vcsi \
+RUN pip3 install cmake vcsi && \
+    pip3 install pyyaml \
     streamlink \
     ffmpeg-python \
-    cvlib opencv-contrib-python-headless tensorflow
+    cvlib opencv-contrib-python-headless tensorflow \
+    face_recognition
 
 RUN mkdir -p /app/download && \
     mkdir /app/config

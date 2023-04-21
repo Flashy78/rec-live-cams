@@ -1,7 +1,9 @@
 from pathlib import Path
 
-import cv2
+# import cnn
+from face_recognition import face_locations, load_image_file
 
+import cv2
 import cvlib as cv
 
 
@@ -12,10 +14,16 @@ def detect_faces(
     faces, confidences = cv.detect_face(image)
 
     if len(faces) >= 2:
-        move_to_folder = new_folder / image_path.parent.name
-        move_to_folder.mkdir(parents=True, exist_ok=True)
-        # Move all images from that streamer into a different folder
-        for file in thumb_folder.rglob(f"**/{username}-*"):
-            file.rename(move_to_folder / file.name)
+        # Double check with another model that this isn't a false positive
+        # cnn_faces = cnn.detect_faces(image_path)
+        image = load_image_file(str(image_path))
+        face_locations = face_locations(image, 0, model="cnn")
+
+        if len(face_locations) >= 2:
+            move_to_folder = new_folder / image_path.parent.name
+            move_to_folder.mkdir(parents=True, exist_ok=True)
+            # Move all images from that streamer into a different folder
+            for file in thumb_folder.rglob(f"**/{username}-*"):
+                file.rename(move_to_folder / file.name)
 
     return faces
