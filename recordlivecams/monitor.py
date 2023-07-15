@@ -520,8 +520,10 @@ class Monitor:
         if run_copy_job:
             self.logger.debug(f"Running ffmpeg copy on {video_path}")
             stream = (
-                ffmpeg.input(str(video_path), **self.config.get("ffmpeg_options", {}))
-                .output(video_path_out, c="copy")
+                ffmpeg.input(
+                    str(video_path), **self.config.get("ffmpeg_input_options", {})
+                )
+                .output(video_path_out, **self.config.get("ffmpeg_output_options", {}))
                 .overwrite_output()
             )
             self.logger.debug(ffmpeg.compile(stream))

@@ -4,8 +4,11 @@ streamlink_plugin_path: "/app/plugins"
 streamlink_default_stream: best
 # An ffmpeg copy command is run on every file to try and fix the very common video stream
 # errors that happen. Hopefully the resulting file can be thumbnailed and played as normal.
-ffmpeg_options:
+ffmpeg_input_options:
     err_detect: ignore_err
+ffmpeg_output_options:
+    c: copy
+    movflags: faststart
 # If the file size is that much smaller than the original after the ffmpeg copy, just keep
 # the original file, even though it is most likely broken.
 file_size_percent_change: 30
