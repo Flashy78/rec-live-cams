@@ -398,11 +398,9 @@ class Monitor:
 
         # Move file into the to_process folder from in_progress
         completed_path = Path(self.processes[name]["path"])
-        if completed_path.exists():
-            self.video_path_to_process.mkdir(parents=True, exist_ok=True)
-            to_process_path = self.video_path_to_process / completed_path.name
-            completed_path.rename(to_process_path)
-            self._index_video(to_process_path)
+        self.video_path_to_process.mkdir(parents=True, exist_ok=True)
+        to_process_path = self.video_path_to_process / completed_path.name
+        completed_path.rename(to_process_path)
 
         # Remove from list of active processes
         del self.processes[name]
@@ -414,6 +412,9 @@ class Monitor:
                     if self._is_online(name, site):
                         self._start_recording(name, site)
                         break
+
+        # Start processing the file
+        self._index_video(to_process_path)
 
     def _check_recording_processes(self):
         """Check status of current recording processes"""
