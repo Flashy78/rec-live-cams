@@ -135,10 +135,10 @@ class Monitor:
         self.mp_pool = mp.Pool(threads)
 
         self.streamlink = streamlink.Streamlink()
-        plugin_count = len(self.streamlink.plugins)
+        plugin_count = len(self.streamlink.plugins.get_names())
         self.logger.debug("Side loading Streamlink plugins")
-        self.streamlink.load_plugins(self.config["streamlink_plugin_path"])
-        plugin_count_new = len(self.streamlink.plugins)
+        self.streamlink.plugins.load_path(self.config["streamlink_plugin_path"])
+        plugin_count_new = len(self.streamlink.plugins.get_names())
         if plugin_count == plugin_count_new:
             self.logger.warning("No new plugins were loaded")
 
@@ -217,12 +217,14 @@ class Monitor:
                     # Create the in memory record for them, with no id
                     streamer_sites = {}
                     for site, username in sites.items():
+                        full_site_name = self._get_full_site_name(site)
+
                         is_primary = False
                         if username == name:
                             is_primary = True
 
-                        streamer_sites[site] = Streamer_Site(
-                            site_name=site,
+                        streamer_sites[full_site_name] = Streamer_Site(
+                            site_name=full_site_name,
                             streamer_name=username,
                             is_primary=is_primary,
                             is_in_db=False,
@@ -234,9 +236,9 @@ class Monitor:
 
                     if check_if_new_streamers_online:
                         # Newly added, so let's immediately check if they're online
-                        for site in self.streamers[name].sites:
-                            if self._is_online(name, site):
-                                self._start_recording(name, site)
+                        for full_site_name in self.streamers[name].sites:
+                            if self._is_online(name, full_site_name):
+                                self._start_recording(name, full_site_name)
                                 break
 
                     added.append(name)
@@ -247,14 +249,18 @@ class Monitor:
                     # Remove any primary sites that are assigned
                     if sites:
                         for site, site_name in sites.items():
+                            full_site_name = self._get_full_site_name(site)
+
                             if (
                                 site_name != name
-                                and site in self.streamers[name].sites
-                                and self.streamers[name].sites[site].is_primary
+                                and full_site_name in self.streamers[name].sites
+                                and self.streamers[name]
+                                .sites[full_site_name]
+                                .is_primary
                             ):
                                 sites = run_sql(
                                     "UPDATE streamer_sites SET is_primary = 0 WHERE streamer_id = ? AND site_name = ?;",
-                                    (self.streamers[name].id, site),
+                                    (self.streamers[name].id, full_site_name),
                                 )
 
             if removed:
@@ -269,6 +275,21 @@ class Monitor:
             self.logger.setLevel(self.config["log_level"])
         except Exception as e:
             self.logger.exception("Unable to load config")
+
+    def _get_full_site_name(self, short_name):
+        match short_name:
+            case "bc":
+                return "bongacams"
+            case "c4":
+                return "cam4"
+            case "cb":
+                return "chaturbate"
+            case "mfc":
+                return "mfc"
+            case "sc":
+                return "stripchat"
+            case _:
+                return short_name
 
     def _list_who_is_recording(self):
         recording = []
@@ -398,9 +419,11 @@ class Monitor:
 
         # Move file into the to_process folder from in_progress
         completed_path = Path(self.processes[name]["path"])
-        self.video_path_to_process.mkdir(parents=True, exist_ok=True)
-        to_process_path = self.video_path_to_process / completed_path.name
-        completed_path.rename(to_process_path)
+        if completed_path.exists():
+            self.video_path_to_process.mkdir(parents=True, exist_ok=True)
+            to_process_path = self.video_path_to_process / completed_path.name
+            completed_path.rename(to_process_path)
+            self._index_video(to_process_path)
 
         # Remove from list of active processes
         del self.processes[name]
@@ -412,9 +435,6 @@ class Monitor:
                     if self._is_online(name, site):
                         self._start_recording(name, site)
                         break
-
-        # Start processing the file
-        self._index_video(to_process_path)
 
     def _check_recording_processes(self):
         """Check status of current recording processes"""
@@ -757,9 +777,14 @@ class Monitor:
             """
         )
 
+        # Keep a map of id->name so the non-primary streamers can be quickly attached
+        id_to_name = {}
         non_primary_streamers = []
+
         for streamer in streamers:
             if streamer["is_primary"]:
+                id_to_name[streamer["id"]] = streamer["name"]
+
                 self.streamers[streamer["name"]] = Streamer(
                     id=streamer["id"],
                     first_online=streamer["first_online"],
@@ -779,14 +804,14 @@ class Monitor:
 
         # Now we can add the non-primary streamers to their existing entry
         for non_primary_streamer in non_primary_streamers:
-            for streamer in self.streamers.values():
-                if streamer.id == non_primary_streamer["id"]:
-                    streamer.sites[non_primary_streamer["site_name"]] = Streamer_Site(
-                        site_name=non_primary_streamer["site_name"],
-                        streamer_name=non_primary_streamer["name"],
-                        is_primary=False,
-                    )
-                    break
+            if non_primary_streamer["id"] in id_to_name:
+                self.streamers[id_to_name[non_primary_streamer["id"]]].sites[
+                    non_primary_streamer["site_name"]
+                ] = Streamer_Site(
+                    site_name=non_primary_streamer["site_name"],
+                    streamer_name=non_primary_streamer["name"],
+                    is_primary=False,
+                )
 
     def _query_site_api(self, site_name):
         if not self.sites[site_name].api_url:
@@ -1034,85 +1059,92 @@ class Monitor:
 
     def _get_thumbnail(self, streamers, site, is_new=False):
         for streamer in streamers:
-            username = streamer["username"]
-            json_url = None
+            try:
+                username = streamer["username"]
+                json_url = None
 
-            if site == "chaturbate":
-                json_url = streamer.get("image_url")
-            elif site == "stripchat":
-                json_url = streamer.get("mlPreviewImage", streamer.get("snapshotUrl"))
-            elif site == "bongacams":
-                if "profile_images" in streamer:
-                    json_url = streamer["profile_images"].get(
-                        "thumbnail_image_big_live",
-                        streamer["profile_images"].get(
-                            "thumbnail_image_medium_live",
-                            streamer["profile_images"].get(
-                                "thumbnail_image_small_live"
-                            ),
-                        ),
+                if site == "chaturbate":
+                    json_url = streamer.get("image_url")
+                elif site == "stripchat":
+                    json_url = streamer.get(
+                        "mlPreviewImage", streamer.get("snapshotUrl")
                     )
-                if json_url:
-                    json_url = json_url.replace("//", "https://")
+                elif site == "bongacams":
+                    if "profile_images" in streamer:
+                        json_url = streamer["profile_images"].get(
+                            "thumbnail_image_big_live",
+                            streamer["profile_images"].get(
+                                "thumbnail_image_medium_live",
+                                streamer["profile_images"].get(
+                                    "thumbnail_image_small_live"
+                                ),
+                            ),
+                        )
+                    if json_url:
+                        json_url = json_url.replace("//", "https://")
 
-            if not json_url:
-                continue
-
-            thumb_url = urlparse(json_url.replace("\\", ""))
-            name_path = Path(unquote(thumb_url.path))
-
-            if is_new:
-                folder = self.streamer_new_thumb_path / str(
-                    self.streamers[username].days_online
-                ).zfill(4)
-            else:
-                prefix = username[0].lower()
-                if not prefix.isalpha():
-                    prefix = "#"
-                folder = self.streamer_thumb_path / prefix
-
-            folder.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%y-%m-%d-%H%M")
-            thumb_path = (
-                folder
-                / f"{username}-{timestamp}-{site}{name_path.suffix if name_path.suffix else '.jpg'}"
-            )
-
-            resp = requests.get(thumb_url.geturl())
-            if resp.ok:
-                img_data = resp.content
-                if len(img_data) == 21971:
-                    # Default chaturbate image
+                if not json_url:
                     continue
 
-                with open(thumb_path, "wb") as handle:
-                    handle.write(img_data)
-                # There some bug where binary files are not getting correct permissions
-                thumb_path.chmod(0o0777)
+                thumb_url = urlparse(json_url.replace("\\", ""))
+                name_path = Path(unquote(thumb_url.path))
 
                 if is_new:
-                    # cvlib.detect_faces(
-                    #     username,
-                    #     thumb_path,
-                    #     self.streamer_new_thumb_path,
-                    #     self.streamer_new_couple_thumb_path,
-                    # )
-                    self.mp_pool.apply_async(
-                        cvlib.detect_faces,
-                        args=(
-                            username,
-                            thumb_path,
-                            self.streamer_new_thumb_path,
-                            self.streamer_new_couple_thumb_path,
-                        ),
-                    )
+                    folder = self.streamer_new_thumb_path / str(
+                        self.streamers[username].days_online
+                    ).zfill(4)
+                else:
+                    prefix = username[0].lower()
+                    if not prefix.isalpha():
+                        prefix = "#"
+                    folder = self.streamer_thumb_path / prefix
+
+                folder.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%y-%m-%d-%H%M")
+                thumb_path = (
+                    folder
+                    / f"{username}-{timestamp}-{site}{name_path.suffix if name_path.suffix else '.jpg'}"
+                )
+
+                resp = requests.get(thumb_url.geturl())
+                if resp.ok:
+                    img_data = resp.content
+                    if len(img_data) == 21971:
+                        # Default chaturbate image
+                        continue
+
+                    with open(thumb_path, "wb") as handle:
+                        handle.write(img_data)
+                    # There some bug where binary files are not getting correct permissions
+                    thumb_path.chmod(0o0777)
+
+                    if is_new:
+                        # cvlib.detect_faces(
+                        #     username,
+                        #     thumb_path,
+                        #     self.streamer_new_thumb_path,
+                        #     self.streamer_new_couple_thumb_path,
+                        # )
+                        self.mp_pool.apply_async(
+                            cvlib.detect_faces,
+                            args=(
+                                username,
+                                thumb_path,
+                                self.streamer_new_thumb_path,
+                                self.streamer_new_couple_thumb_path,
+                            ),
+                        )
+            except Exception as e:
+                self.logger.error(f"Error getthing thumbnail: {e}")
 
     def _get_new_thumbnail(self, streamers, site):
         # Only get those we need new thumbs for
         streamers_to_get = []
         for streamer in streamers:
-            if self.streamers[
-                streamer["username"]
+            name = streamer["username"]
+
+            if name in self.streamers and self.streamers[
+                name
             ].last_picture_at < datetime.now() - timedelta(
                 minutes=self.config["new_streamer_thumb_min"]
             ):

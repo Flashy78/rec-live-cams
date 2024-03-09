@@ -14,10 +14,10 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
     # logger.debug("check_who_is_online started")
 
     sl = streamlink.Streamlink()
-    plugin_count = len(sl.plugins)
+    plugin_count = len(sl.plugins.get_names())
     # logger.debug("Side loading Streamlink plugins")
-    sl.load_plugins(config["streamlink_plugin_path"])
-    plugin_count_new = len(sl.plugins)
+    sl.plugins.load_path(config["streamlink_plugin_path"])
+    plugin_count_new = len(sl.plugins.get_names())
     if plugin_count == plugin_count_new:
         logger.warning("No new plugins were loaded")
 

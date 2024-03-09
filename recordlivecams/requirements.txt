@@ -4,4 +4,4 @@ ffmpeg-python
 opencv-contrib-python
 pyyaml
 streamlink
-tensorflow
+tensorflow==2.10.0

@@ -65,6 +65,10 @@ class Stripchat(Plugin):
             data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
         )
 
+        server3 = "https://edge-hls.doppiocdn.net/hls/{1}/master/{1}.m3u8".format(
+            data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        )
+
         self.logger.info("Stream status: {0}".format(data["user"]["user"]["status"]))
 
         if (
@@ -74,15 +78,25 @@ class Stripchat(Plugin):
         ):
             try:
                 for s in HLSStream.parse_variant_playlist(
-                    self.session, server1, headers={"Referer": self.url}
+                    self.session, server3, headers={"Referer": self.url}
                 ).items():
                     yield s
             except IOError as e:
                 if "522" in str(e):
-                    for s in HLSStream.parse_variant_playlist(
-                        self.session, server0, headers={"Referer": self.url}
-                    ).items():
-                        yield s
+                    try:
+                        for s in HLSStream.parse_variant_playlist(
+                            self.session, server0, headers={"Referer": self.url}
+                        ).items():
+                            yield s
+                    except IOError as e:
+                        if "522" in str(e):
+                            for s in HLSStream.parse_variant_playlist(
+                                self.session, server1, headers={"Referer": self.url}
+                            ).items():
+                                yield s
+                        else:
+                            stream = HLSStream(self.session, server0)
+                            yield "Auto", stream
                 else:
                     stream = HLSStream(self.session, server0)
                     yield "Auto", stream
