@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import time
 import multiprocessing as mp
@@ -79,7 +81,12 @@ class Monitor:
     thumb_processes = {}
 
     def __init__(
-        self, logger, config_path: Path, config_template_path: Path, video_path: Path
+        self,
+        logger,
+        config_path: Path,
+        config_template_path: Path,
+        video_path: Path,
+        completed_path: Path,
     ):
         self.logger = logger
         self.logger.info(f"Version: {_version}")
@@ -91,8 +98,9 @@ class Monitor:
         self.video_path_in_progress.mkdir(parents=True, exist_ok=True)
         self.video_path_to_process = video_path / "to_process"
         self.video_path_to_process.mkdir(parents=True, exist_ok=True)
-        self.video_path_failed = video_path / "failed"
-        self.video_path_failed.mkdir(parents=True, exist_ok=True)
+        self.completed_path = completed_path
+        self.completed_path_failed = completed_path / "failed"
+        self.completed_path_failed.mkdir(parents=True, exist_ok=True)
         self.streamer_thumb_path = (
             video_path / "streamer_thumbnails" / "first_seen_online"
         )
@@ -272,7 +280,13 @@ class Monitor:
                     f"Added: {(', ').join(sorted(added, key=str.casefold))}"
                 )
 
-            self.logger.setLevel(self.config["log_level"])
+            log_level = self.config["log_level"]
+            self.logger.setLevel(log_level)
+            if log_level == "DEBUG":
+                # Don't log url requests for debug
+                logging.getLogger("requests").setLevel(logging.WARNING)
+                logging.getLogger("urllib3").setLevel(logging.WARNING)
+
         except Exception as e:
             self.logger.exception("Unable to load config")
 
@@ -360,6 +374,26 @@ class Monitor:
             )
             self.check_thread.start()
 
+    # def _start_recording(self, name, site, is_being_restarted=False):
+    #     if not is_being_restarted:
+    #         if self.streamers[name].is_recording:
+    #             return
+
+    #         self.streamers[name].is_recording = True
+    #         # self.streamers[name].started_at = datetime.now()
+    #         started_at = datetime.now()
+
+    #         self._start_recording_process(name, site)
+    #     else:
+    #         self._start_recording_process(name, site)
+
+    # def _start_recording_process(
+    #     self, name: str, site: str, started_at: datetime
+    # ) -> None:
+    #     self.logger.info(f"Starting to record {name} on {site}")
+
+    #     timestamp = started_at.strftime("%y-%m-%d-%H%M")
+
     def _start_recording(self, name, site):
         if self.streamers[name].is_recording:
             return
@@ -385,7 +419,7 @@ class Monitor:
             "-o",
             filename,
         ]
-        self.logger.debug(f"Running: {cmd}")
+        self.logger.debug(f"Running: {cmd.join(' ')}")
 
         self.processes[name] = {
             "path": filename,
@@ -400,6 +434,36 @@ class Monitor:
         }
 
     def _stop_recording_process(self, name: str, restart: bool = False) -> None:
+        #     # If restart is false, we can just go ahead and kill the process, however if
+        #     # it's true, we want to ensure we've successfully started the new recording
+        #     # before stopping the current one.
+        #     if not restart or self.shutting_down:
+        #         self._stop_video(name)
+        #     else:
+        #         # Need to mark them as not recording or _start_recording will ignore
+        #         if name in self.streamers.keys():
+        #             self.streamers[name].is_recording = False
+
+        #         # They may still be active on another site
+        #         if name in self.streamers:
+        #             for site in self.streamers[name].sites:
+        #                 if self._is_online(name, site):
+        #                     self._start_recording(name, site)
+        #                     break
+
+        #     # Move file into the to_process folder from in_progress
+        #     completed_path = Path(self.processes[name]["path"])
+        #     self.video_path_to_process.mkdir(parents=True, exist_ok=True)
+        #     to_process_path = self.video_path_to_process / completed_path.name
+        #     completed_path.rename(to_process_path)
+
+        #     # Remove from list of active processes
+        #     del self.processes[name]
+
+        #     # Start processing the file
+        #     self._index_video(to_process_path)
+
+        # def _stop_video(self, name: str) -> None:
         try:
             stdout, stderr = self.processes[name]["process"].communicate(timeout=15)
             # self.logger.debug(f"STDOUT:{stdout}")
@@ -476,7 +540,7 @@ class Monitor:
         """Returns true if video is over max_recording_min + 10"""
         try:
             probe = ffmpeg.probe(str(video_path), show_entries="format=duration")
-            self.logger.debug(probe)
+            # self.logger.debug(f"Probe result: {probe}")
             seconds = int(float(probe["format"]["duration"]))
             minutes = seconds / 60
             if minutes > self.config["max_recording_min"] + 10:
@@ -501,7 +565,12 @@ class Monitor:
             return
 
         video_path_out = str(video_path).replace(".mp4", ".mkv")
-        run_copy_job = True
+        run_copy_job = self.config.get("run_index_job", True)
+
+        if not run_copy_job:
+            # Config says not to run the index job, just try and generate thumbnails
+            self._generate_thumbnails(str(video_path))
+            return
 
         if self._is_video_incorrect_length(video_path):
             run_copy_job = False
@@ -547,7 +616,7 @@ class Monitor:
                 .output(video_path_out, **self.config.get("ffmpeg_output_options", {}))
                 .overwrite_output()
             )
-            self.logger.debug(ffmpeg.compile(stream))
+            self.logger.debug(ffmpeg.compile(stream).join(" "))
 
             self.index_processes[str(video_path)] = {
                 "started_at": datetime.now(),
@@ -557,7 +626,12 @@ class Monitor:
     def _check_index_video_processes(self):
         for video_path in list(self.index_processes):
             process = self.index_processes[video_path]
-            if (process["started_at"] + timedelta(minutes=30)) < datetime.now():
+            timed_out = False
+            if (
+                process["started_at"]
+                + timedelta(minutes=self.config.get("index_video_timeout_min", 30))
+            ) < datetime.now():
+                timed_out = True
                 process["process"].kill()
 
             if process["process"].poll() is not None:
@@ -567,8 +641,9 @@ class Monitor:
                     process["process"].kill()
                     stdout, stderr = process["process"].communicate()
                 finally:
-                    # self.logger.debug(f"STDOUT: {stdout}")
-                    # self.logger.debug(f"STDERR: {stderr}")
+                    if timed_out:
+                        self.logger.debug(f"STDOUT: {stdout}")
+                        self.logger.debug(f"STDERR: {stderr}")
                     pass
 
                 # Remove from list of active processes
@@ -594,19 +669,16 @@ class Monitor:
                             abs(new_file_size - orig_file_size) / orig_file_size
                         ) * 100
 
-                    self.logger.debug(
-                        f"After indexing: {new_file.name} changed {percent_changed}%"
-                    )
-                    if percent_changed < self.config.get(
-                        "file_size_percent_change", 20
-                    ):
+                    # self.logger.debug(f"After indexing: {new_file.name} changed {percent_changed}%")
+                    allowed_change = self.config.get("file_size_percent_change", 20)
+                    if percent_changed < allowed_change:
                         try:
                             new_file.replace(video_path)
                         except Exception as e:
                             self.logger.error(f"Error replacing file: {e}")
                     else:
                         self.logger.warning(
-                            f"Got larger than 20% size change for {video_path}"
+                            f"Got larger than {allowed_change}% size change for {video_path}"
                         )
                         # The mkv file wasn't able to be created, delete it and just try to make thumbs
                         if new_file.exists():
@@ -650,7 +722,13 @@ class Monitor:
     def _check_generate_thumbnail_processes(self):
         for video_path in list(self.thumb_processes):
             process = self.thumb_processes[video_path]
-            if (process["started_at"] + timedelta(minutes=30)) < datetime.now():
+            timed_out = False
+
+            if (
+                process["started_at"]
+                + timedelta(minutes=self.config.get("thumbnail_gen_timeout_min", 30))
+            ) < datetime.now():
+                timed_out = True
                 process["process"].kill()
 
             if process["process"].poll() is not None:
@@ -659,10 +737,6 @@ class Monitor:
                 except subprocess.TimeoutExpired:
                     process["process"].kill()
                     stdout, stderr = process["process"].communicate()
-                finally:
-                    # self.logger.debug(f"STDOUT: {stdout}")
-                    # self.logger.debug(f"STDERR: {stderr}")
-                    pass
 
                 # Remove from list of active processes
                 del self.thumb_processes[video_path]
@@ -670,13 +744,26 @@ class Monitor:
                 file_path = Path(video_path)
                 thumb_path = Path(file_path.with_suffix(".mp4.jpg"))
                 if not thumb_path.exists():
-                    self.logger.warn(f"Unable to generate thumbnails for {file_path}")
+                    self.logger.debug(f"STDOUT: {stdout}")
+                    self.logger.debug(f"STDERR: {stderr}")
+
+                    if timed_out:
+                        self.logger.warn(
+                            f"Timed out generating thumbnails for {file_path}"
+                        )
+                    else:
+                        self.logger.warn(
+                            f"Unable to generate thumbnails for {file_path}"
+                        )
                     # Move to failed folder
-                    file_path.rename(self.video_path_failed / file_path.name)
+                    self._fix_permissions(file_path)
+                    shutil.move(file_path, self.completed_path_failed / file_path.name)
                 else:
                     # Move to completed folder
-                    file_path.rename(self.video_path / file_path.name)
-                    thumb_path.rename(self.video_path / thumb_path.name)
+                    self._fix_permissions(file_path)
+                    shutil.move(file_path, self.completed_path / file_path.name)
+                    self._fix_permissions(thumb_path)
+                    shutil.move(thumb_path, self.completed_path / thumb_path.name)
             else:
                 self.logger.debug(f"Thumbnail still running for {video_path}")
 
@@ -687,7 +774,7 @@ class Monitor:
             "find",
             "/tmp",
             "-name",
-            "*.bmp",
+            "'*.bmp'",
             "-mmin",
             f"+{self.config['thumbnail_cleanup_min']}",
             "-delete",
@@ -825,13 +912,6 @@ class Monitor:
             r = requests.get(url)
             r.raise_for_status()
             data = r.json()
-            """
-            # TODO: Stop using file
-            with open(
-                Path(f"C:\\Users\\Matt\\code\\rec-live-cams\{site_name}.json")
-            ) as f:
-                data = json.load(f)
-            """
         except (
             requests.exceptions.RequestException,
             json.decoder.JSONDecodeError,
@@ -965,8 +1045,11 @@ class Monitor:
                 else:
                     streamers_new.append(streamer)
 
-        self.logger.debug(f"{len(streamers_to_add)} streamers to add")
-        self.logger.debug(f"{len(streamers_to_update)} streamers to update")
+        self.logger.debug(
+            f"{site_name}: {len(streamers_to_update)} streamers to update"
+        )
+        if len(streamers_to_add) > 0:
+            self.logger.debug(f"{site_name}: {len(streamers_to_add)} streamers to add")
 
         conn = get_conn()
         c = conn.cursor()
@@ -1116,7 +1199,8 @@ class Monitor:
                     with open(thumb_path, "wb") as handle:
                         handle.write(img_data)
                     # There some bug where binary files are not getting correct permissions
-                    thumb_path.chmod(0o0777)
+                    self._fix_permissions(thumb_path)
+                    # thumb_path.chmod(0o0777)
 
                     if is_new:
                         # cvlib.detect_faces(
@@ -1151,8 +1235,20 @@ class Monitor:
                 self.streamers[streamer["username"]].last_picture_at = datetime.now()
                 streamers_to_get.append(streamer)
 
-        self.logger.debug(f"Getting new thumbs for {len(streamers_to_get)} streamers")
+        self.logger.debug(
+            f"{site}: getting new thumbs for {len(streamers_to_get)} streamers"
+        )
         self._get_thumbnail(streamers_to_get, site, True)
+
+    def _fix_permissions(self, path):
+        shutil.chown(str(path), "nobody", "users")
+        path.chmod(
+            path.stat().st_mode
+            | stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IRGRP
+            | stat.S_IWGRP
+        )
 
     def run(self):
         while self.running:

@@ -11,7 +11,7 @@ RUN mkdir /ffmpeg-temp && \
     cd $(ls | head -1) && \
     mv ffmpeg ffprobe /usr/bin/
 
-RUN pip3 install cmake vcsi && \
+RUN pip3 install cmake "git+https://github.com/Flashy78/vcsi.git@empty-thumbnail" && \
     pip3 install pyyaml \
     streamlink \
     ffmpeg-python \
