@@ -419,7 +419,7 @@ class Monitor:
             "-o",
             filename,
         ]
-        self.logger.debug(f"Running: {cmd.join(' ')}")
+        self.logger.debug(f"Running: {' '.join(cmd)}")
 
         self.processes[name] = {
             "path": filename,
