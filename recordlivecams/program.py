@@ -22,6 +22,10 @@ def main():
 
     migrator.migrate(logger, config_path / "db.sqlite3")
 
+    # completed_path may not be mounted into Docker, in that case just use video_path as the default location
+    if not completed_path.exists():
+        completed_path = video_path
+
     monitor = Monitor(
         logger, config_path, config_template_path, video_path, completed_path
     )

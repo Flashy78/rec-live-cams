@@ -14,7 +14,7 @@ _post_schema = validate.Schema(
         "cam": validate.Schema(
             {
                 "streamName": str,
-                "viewServers": validate.Schema({"flashphoner-hls": str}),
+                # "viewServers": validate.Schema({"flashphoner-hls": str}),
             }
         ),
         "user": validate.Schema(
@@ -44,29 +44,33 @@ class Stripchat(Plugin):
 
         # This needs to happen before the call to .json because the validation will fail on the cam key
         if res.json()["user"]["user"]["isDeleted"]:
-            log.warn(f"Stripchat user {username} is deleted")
+            log.warning(f"Stripchat user {username} is deleted")
             return
 
         data = self.session.http.json(res, schema=_post_schema)
 
-        server = "https://b-{0}.strpst.com/hls/{1}/master_{1}.m3u8".format(
-            data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
-        )
+        # server = "https://b-{0}.strpst.com/hls/{1}/master_{1}.m3u8".format(
+        #    data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        # )
 
-        server0 = "https://b-{0}.strpst.com/hls/{1}/{1}.m3u8".format(
-            data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
-        )
+        # server0 = "https://b-{0}.strpst.com/hls/{1}/{1}.m3u8".format(
+        #    data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        # )
 
-        server1 = "https://b-{0}.doppiocdn.com/hls/{1}/master_{1}.m3u8".format(
-            data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
-        )
+        # server1 = "https://b-{0}.doppiocdn.com/hls/{1}/master_{1}.m3u8".format(
+        #    data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        # )
 
-        server2 = "https://b-{0}.doppiocdn.com/hls/{1}/{1}.m3u8".format(
-            data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
-        )
+        # server2 = "https://b-{0}.doppiocdn.com/hls/{1}/{1}.m3u8".format(
+        #    data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        # )
 
-        server3 = "https://edge-hls.doppiocdn.net/hls/{1}/master/{1}.m3u8".format(
-            data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        # server3 = "https://edge-hls.doppiocdn.net/hls/{1}/master/{1}.m3u8".format(
+        #    data["cam"]["viewServers"]["flashphoner-hls"], data["cam"]["streamName"]
+        # )
+
+        server3 = "https://edge-hls.sacdnssedge.com/hls/{0}/master/{0}.m3u8".format(
+            data["cam"]["streamName"]
         )
 
         self.logger.info("Stream status: {0}".format(data["user"]["user"]["status"]))
@@ -74,32 +78,31 @@ class Stripchat(Plugin):
         if (
             data["user"]["user"]["isLive"] is True
             and data["user"]["user"]["status"] == "public"
-            and server
         ):
-            try:
-                for s in HLSStream.parse_variant_playlist(
-                    self.session, server3, headers={"Referer": self.url}
-                ).items():
-                    yield s
-            except IOError as e:
-                if "522" in str(e):
-                    try:
-                        for s in HLSStream.parse_variant_playlist(
-                            self.session, server0, headers={"Referer": self.url}
-                        ).items():
-                            yield s
-                    except IOError as e:
-                        if "522" in str(e):
-                            for s in HLSStream.parse_variant_playlist(
-                                self.session, server1, headers={"Referer": self.url}
-                            ).items():
-                                yield s
-                        else:
-                            stream = HLSStream(self.session, server0)
-                            yield "Auto", stream
-                else:
-                    stream = HLSStream(self.session, server0)
-                    yield "Auto", stream
+            # try:
+            for s in HLSStream.parse_variant_playlist(
+                self.session, server3, headers={"Referer": self.url}
+            ).items():
+                yield s
+            # except IOError as e:
+            #    if "522" in str(e):
+            #        try:
+            #            for s in HLSStream.parse_variant_playlist(
+            #                self.session, server0, headers={"Referer": self.url}
+            #            ).items():
+            #                yield s
+            #        except IOError as e:
+            #            if "522" in str(e):
+            #                for s in HLSStream.parse_variant_playlist(
+            #                    self.session, server1, headers={"Referer": self.url}
+            #                ).items():
+            #                    yield s
+            #            else:
+            #                stream = HLSStream(self.session, server0)
+            #                yield "Auto", stream
+            #    else:
+            #        stream = HLSStream(self.session, server0)
+            #        yield "Auto", stream
 
 
 __plugin__ = Stripchat
