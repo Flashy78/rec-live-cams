@@ -1,15 +1,29 @@
+from logging import Logger
+from queue import Queue
 import time
 from datetime import datetime, timedelta
+from typing import Dict
 
 import streamlink
 from websocket import _exceptions
+
+from recordlivecams.classes import Record, Site, Streamer
 
 # Object that signals shutdown
 _sentinel = object()
 
 
-def check_who_is_online(logger, start_recording_q, config, sites, streamers):
-    """Goes through all streamers in the config looking for who is online"""
+def check_who_is_online(
+    logger: Logger,
+    start_recording_q: Queue,
+    config: Dict,
+    sites: Dict[str, Site],
+    streamers: Dict[int, Streamer],
+) -> None:
+    """
+    Goes through all streamers in the config looking for who is online.
+    This is only run for sites in the config that do not have api_url, so Cam4 and MFC
+    """
 
     # logger.debug("check_who_is_online started")
 
@@ -25,7 +39,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
     last_month = datetime.now() - timedelta(days=30)
 
     for streamer in list(streamers.values()):
-        if not streamer.watch or streamer.is_recording:
+        if streamer.record == Record.NEVER or streamer.is_recording:
             continue
 
         # Should we skip this streamer because they haven't been online in a long
@@ -51,6 +65,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
         streamer.last_checked_at = datetime.now()
 
         for site in streamer.sites:
+            # Don't run this streamer by streamer check if the site has an API
             if "api_url" in config["sites"][site]:
                 continue
 
@@ -60,7 +75,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
             if sec_to_sleep > 0:
                 time.sleep(sec_to_sleep)
 
-            username = streamer.sites[site].streamer_name
+            username = streamer.sites[site].username
             sites[site].last_checked_at = datetime.now()
             streams = {}
             try:
@@ -85,7 +100,7 @@ def check_who_is_online(logger, start_recording_q, config, sites, streamers):
 
             if len(streams) > 1:
                 streamer.last_online = datetime.now()
-                start_recording_q.put((streamer.name, site))
+                start_recording_q.put((streamer.id, site))
                 break
 
     # logger.debug("check_who_is_online completed")

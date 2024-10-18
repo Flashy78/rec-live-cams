@@ -69,6 +69,9 @@ sites:
         check_rate_limit_sec: 6
         api_key: "xxxxxx"
         api_url: "https://chaturbate.com/affiliates/api/onlinerooms/?format=json&wm={API_KEY}"
+    flirt4free:
+        url: "https://www.flirt4free.com/?tpl=index2&model=json"
+        check_rate_limit_sec: 60
     stripchat: 
         url: "https://stripchat.com/{username}"
         check_rate_limit_sec: 4

@@ -1,6 +1,9 @@
 cvlib
+deepdiff
 dlib
+face_recognition
 ffmpeg-python
+numpy==1.26.4
 opencv-contrib-python
 pyyaml
 streamlink

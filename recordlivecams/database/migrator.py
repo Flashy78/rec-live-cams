@@ -2,7 +2,6 @@
 
 import datetime
 import subprocess
-import shutil
 from importlib import resources
 from pathlib import Path
 

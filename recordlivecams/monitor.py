@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -8,70 +9,27 @@ import subprocess
 import time
 import multiprocessing as mp
 
-from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from typing import Any, Dict
+from typing import Dict, List
 from urllib.parse import unquote, urlparse
 
 import ffmpeg
 import requests
 import streamlink
+import streamlink.options
 import yaml
+from deepdiff import DeepDiff
 
+from recordlivecams.classes import CamStatus, Record, Site, Streamer, Streamer_Site
 from recordlivecams.database.common import get_conn, run_sql, set_db_path
 from recordlivecams.processes import check_who_is_online
 from recordlivecams.face_detector import cvlib
 
 _version = "1.0.0"
-
-
-@dataclass
-class Streamer_Site:
-    """Class for keeping track of a site setting for a streamer"""
-
-    site_name: str
-    streamer_name: str
-    is_primary: bool = True
-    # This is just to avoid trying to insert secondary site records every refresh
-    is_in_db: bool = True
-
-
-@dataclass
-class Streamer:
-    """Class for keeping track of streamers"""
-
-    id: int
-    name: str
-    sites: Dict[str, Streamer_Site]
-    watch: bool = False
-    is_recording: bool = False
-    # When did the current recording start
-    started_at: datetime = datetime.now()
-    # Stored in the db for the first time they were online.
-    first_online: datetime = datetime.now()
-    # Stored in the db from the last time they were online.
-    last_online: datetime = datetime.now()
-    # Stored in the db how many times have we seen them online (only counts once per 24h)?
-    days_online: int = 1
-    # For the site polling feature to make sure they aren't checked very often when
-    # they haven't been seen online in a long time.
-    last_checked_at: datetime = datetime.now()
-    last_picture_at: datetime = datetime(1970, 1, 1)
-
-
-@dataclass
-class Site:
-    """Class for data about a site"""
-
-    name: str
-    url: str
-    api_key: str
-    api_url: str
-    rate_limit_sec: int
-    last_checked_at: datetime
 
 
 class Monitor:
@@ -82,7 +40,7 @@ class Monitor:
 
     def __init__(
         self,
-        logger,
+        logger: logging.Logger,
         config_path: Path,
         config_template_path: Path,
         video_path: Path,
@@ -119,9 +77,11 @@ class Monitor:
         self.config_path = config_path / "config.yaml"
         self.config_template_path = config_template_path
         self.video_path = video_path
-        self.streamers = {}
-        self.sites = {}
-        self.currently_recording = []
+        self.streamers: Dict[int, Streamer] = {}
+        # Key is username-site_name
+        self.username_by_site: Dict[str, int] = {}
+        self.sites: Dict[str, Site] = {}
+        self.currently_recording: List[int] = []
         self.orphan_file_list = []
 
         self.start_recording_q = Queue()
@@ -144,7 +104,7 @@ class Monitor:
 
         self.streamlink = streamlink.Streamlink()
         plugin_count = len(self.streamlink.plugins.get_names())
-        self.logger.debug("Side loading Streamlink plugins")
+        # self.logger.debug("Side loading Streamlink plugins")
         self.streamlink.plugins.load_path(self.config["streamlink_plugin_path"])
         plugin_count_new = len(self.streamlink.plugins.get_names())
         if plugin_count == plugin_count_new:
@@ -154,7 +114,7 @@ class Monitor:
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
 
-    def stop(self, signum, stack):
+    def stop(self, signum, stack) -> None:
         if self.running:
             self.logger.info("Caught stop signal, stopping all recordings")
             self.running = False
@@ -163,20 +123,20 @@ class Monitor:
 
             for process in self.processes.values():
                 # Send sigint, wait for end
-                process["process"].send_signal(signal.SIGINT)
+                process["process"].send_signal(signal.SIGTERM)
                 process["process"].wait()
 
             for process in self.index_processes.values():
                 # Send sigint, wait for end
-                process["process"].send_signal(signal.SIGINT)
+                process["process"].send_signal(signal.SIGTERM)
                 process["process"].wait()
 
             for process in self.thumb_processes.values():
                 # Send sigint, wait for end
-                process["process"].send_signal(signal.SIGINT)
+                process["process"].send_signal(signal.SIGTERM)
                 process["process"].wait()
 
-    def _load_config(self) -> Any:
+    def _load_config(self) -> Dict:
         # opens file, returns json dict, returns None if error
         try:
             if not self.config_path.is_file():
@@ -198,86 +158,165 @@ class Monitor:
             self.logger.exception("Error loading config")
             return None
 
-    def _reload_config(self, check_if_new_streamers_online=True):
+    def _reload_config(self, check_if_new_streamers_online: bool = True) -> None:
+        added = []
+        updated = []
+        removed = []
         try:
+            conn = get_conn()
+            c = conn.cursor()
+
             # Load the config and update streamers
             newConfig = self._load_config()
             if newConfig:
+                # Let's figure out what streamers have been added/removed/changed
+                affected_root_keys = []
+                if not self.config:
+                    # On initial load we can't run a diff, so just add everyone
+                    affected_root_keys = newConfig["streamers"].keys()
+                    self.config = {"streamers": {}}
+                else:
+                    diff = DeepDiff(self.config["streamers"], newConfig["streamers"])
+                    affected_root_keys = diff.affected_root_keys
+
+                # Need to go through all affected_root_keys and find out how they changed.
+                for root_key in affected_root_keys:
+                    if (
+                        root_key in self.config["streamers"]
+                        and root_key in newConfig["streamers"]
+                    ):
+                        updated.append(root_key)
+                    elif root_key in self.config["streamers"]:
+                        removed.append(root_key)
+                    else:
+                        added.append(root_key)
+
+                # Removed
+                for name in removed:
+                    # Looks up their old dict entry by name and use one of the sites to get their model id
+                    old = self.config["streamers"][name]
+                    site = next(iter(old))
+                    site_name = self._get_full_site_name(site)
+                    streamer_id = self.username_by_site[f"{old[site]}-{site_name}"]
+                    if not streamer_id:
+                        self.logger.warning(
+                            f"Couldn't find an id for {name}-{site_name} during streamer removal"
+                        )
+                        continue
+
+                    if self.streamers[streamer_id].record != Record.NEVER:
+                        self.streamers[streamer_id].record = Record.NEVER
+                        # Stop recording deleted streamers
+                        if self.streamers[streamer_id].is_recording:
+                            self._stop_recording_process(streamer_id)
+
+                # Added
+                for name in added:
+                    # TODO: If they get a new username from a diff site in the config, how to add it?
+                    # Maybe just update the new streamer.name field?
+
+                    # Take the new site and look up model_id
+                    new = newConfig["streamers"][name]
+                    site = next(iter(new))
+                    site_name = self._get_full_site_name(site)
+                    streamer_id = self.username_by_site[f"{new[site]}-{site_name}"]
+                    if not streamer_id:
+                        # self.logger.warning(f"Couldn't find an id for {name}-{site_name} during streamer add")
+                        # Ignore them for now until they are seen online
+                        del newConfig["streamers"][name]
+                        continue
+
+                    # Go through all sites assigned in the config and associate with this model id
+                    # For now don't do anything with the orphaned streamer rows, they will get cleaned up in rewrite
+                    self.streamers[streamer_id].name = name
+                    for site_name, streamer_name in new.items():
+                        site_name = self._get_full_site_name(site_name)
+                        old_streamer_id = self.username_by_site[
+                            f"{streamer_name}-{site_name}"
+                        ]
+                        self.username_by_site[f"{streamer_name}-{site_name}"] = (
+                            streamer_id
+                        )
+
+                        # Port the site over to the new streamer, updating streamer_id
+                        self.streamers[streamer_id].sites[site_name] = replace(
+                            self.streamers[old_streamer_id].sites[site_name]
+                        )
+                        self.streamers[streamer_id].sites[
+                            site_name
+                        ].streamer_id = streamer_id
+
+                        # Update the database record with the association
+                        c.execute(
+                            """
+                            UPDATE streamer_sites
+                            SET streamer_id = ?
+                            WHERE name = ? AND site_name = ?;
+                            """,
+                            (streamer_id, streamer_name, site_name),
+                        )
+                        conn.commit()
+
+                    self.streamers[streamer_id].record = Record.ALWAYS
+                    if check_if_new_streamers_online:
+                        self._start_recording(streamer_id)
+
+                # Changed
+                for name in updated:
+                    site_name = self._get_full_site_name(new.sites[0].site_name)
+                    streamer_id = self.username_by_site[f"{name}-{site_name}"]
+
+                    # Go through any other sites assigned in the config and associate with this model id
+                    # For now don't do anything with the orphaned streamer rows, they will get cleaned up in rewrite
+                    self.streamers[streamer_id].name = name
+                    for site_name, streamer_name in new.sites.items():
+                        # TODO: Site could have been removed from config
+                        site_name = self._get_full_site_name(site_name)
+                        old_streamer_id = self.username_by_site[
+                            f"{streamer_name}-{site_name}"
+                        ]
+                        self.username_by_site[f"{streamer_name}-{site_name}"] = (
+                            streamer_id
+                        )
+
+                        # Port the site over to the new streamer, updating streamer_id
+                        self.streamers[streamer_id].sites[site_name] = replace(
+                            self.streamers[old_streamer_id].sites[site_name]
+                        )
+                        self.streamers[streamer_id].sites[
+                            site_name
+                        ].streamer_id = streamer_id
+
+                        # Update the database record with the association
+                        c.execute(
+                            """
+                            UPDATE streamer_sites
+                            SET streamer_id = ?
+                            WHERE name = ? AND site_name = ?;
+                            """,
+                            (streamer_id, streamer_name, site_name),
+                        )
+                        conn.commit()
+
+                    # Kick off recording because maybe a new site was added that they are active on
+                    if not self.streamers[streamer_id].is_recording:
+                        self._start_recording(streamer_id)
+
                 self.config = newConfig
             else:
                 return
 
-            # Get the latest list of streamers to watch
-            removed = []
-            added = []
-            # Stop watching deleted streamers
-            for name in list(self.streamers.keys()):
-                if name not in self.config["streamers"].keys():
-                    if self.streamers[name].watch:
-                        removed.append(name)
-                    self.streamers[name].watch = False
-
-            # Update all other streamers
-            for name, sites in self.config["streamers"].items():
-                # If they are brand new
-                if name not in self.streamers.keys():
-                    self.logger.warning(f"Streamer {name} not found in the database")
-                    # Create the in memory record for them, with no id
-                    streamer_sites = {}
-                    for site, username in sites.items():
-                        full_site_name = self._get_full_site_name(site)
-
-                        is_primary = False
-                        if username == name:
-                            is_primary = True
-
-                        streamer_sites[full_site_name] = Streamer_Site(
-                            site_name=full_site_name,
-                            streamer_name=username,
-                            is_primary=is_primary,
-                            is_in_db=False,
-                        )
-
-                    self.streamers[name] = Streamer(
-                        id=None, name=name, sites=streamer_sites, watch=True
-                    )
-
-                    if check_if_new_streamers_online:
-                        # Newly added, so let's immediately check if they're online
-                        for full_site_name in self.streamers[name].sites:
-                            if self._is_online(name, full_site_name):
-                                self._start_recording(name, full_site_name)
-                                break
-
-                    added.append(name)
-                else:
-                    # TODO: If they get a new username from a diff site in the config, how to add it?
-                    self.streamers[name].watch = True
-
-                    # Remove any primary sites that are assigned
-                    if sites:
-                        for site, site_name in sites.items():
-                            full_site_name = self._get_full_site_name(site)
-
-                            if (
-                                site_name != name
-                                and full_site_name in self.streamers[name].sites
-                                and self.streamers[name]
-                                .sites[full_site_name]
-                                .is_primary
-                            ):
-                                sites = run_sql(
-                                    "UPDATE streamer_sites SET is_primary = 0 WHERE streamer_id = ? AND site_name = ?;",
-                                    (self.streamers[name].id, full_site_name),
-                                )
-
-            if removed:
-                self.logger.info(
-                    f"Removed: {(', ').join(sorted(removed, key=str.casefold))}"
-                )
             if added:
                 self.logger.info(
                     f"Added: {(', ').join(sorted(added, key=str.casefold))}"
+                )
+            if updated:
+                self.logger.info(
+                    f"Updated: {(', ').join(sorted(updated, key=str.casefold))}"
+                )
+            if removed:
+                self.logger.info(
+                    f"Removed: {(', ').join(sorted(removed, key=str.casefold))}"
                 )
 
             log_level = self.config["log_level"]
@@ -290,7 +329,7 @@ class Monitor:
         except Exception as e:
             self.logger.exception("Unable to load config")
 
-    def _get_full_site_name(self, short_name):
+    def _get_full_site_name(self, short_name: str) -> str:
         match short_name:
             case "bc":
                 return "bongacams"
@@ -298,6 +337,8 @@ class Monitor:
                 return "cam4"
             case "cb":
                 return "chaturbate"
+            case "ff":
+                return "flirt4free"
             case "mfc":
                 return "mfc"
             case "sc":
@@ -305,16 +346,23 @@ class Monitor:
             case _:
                 return short_name
 
-    def _list_who_is_recording(self):
+    def _get_streamer_names_from_ids(self, ids: List[int]) -> List[str]:
+        names = []
+        for id in ids:
+            names.append(self.streamers[id].name)
+
+        return names
+
+    def _list_who_is_recording(self) -> None:
         recording = []
-        for name, streamer in self.streamers.items():
+        for id, streamer in self.streamers.items():
             if streamer.is_recording:
-                recording.append(name)
+                recording.append(id)
 
         if recording and self.currently_recording != set(recording):
             self.currently_recording = set(recording)
             self.logger.info(
-                f"Recording: {(', ').join(sorted(recording, key=str.casefold))}"
+                f"Recording: {(', ').join(sorted(self._get_streamer_names_from_ids(recording), key=str.casefold))}"
             )
 
         if len(recording) != len(self.processes):
@@ -322,10 +370,12 @@ class Monitor:
                 f"Recording {len(recording)} streamers, but {len(self.processes)} threads running"
             )
             # Sometimes a streamer gets marked as being recorded, but the thread is cancelled and not caught
-            for name in recording:
-                if name not in self.processes:
-                    self.logger.info(f"Marking {name} as not being recorded")
-                    self.streamers[name].is_recording = False
+            for id in recording:
+                if id not in self.processes:
+                    self.logger.info(
+                        f"Marking {self.streamers[id].name} as not being recorded"
+                    )
+                    self.streamers[id].is_recording = False
 
         index_procs = len(self.index_processes)
         thumb_procs = len(self.thumb_processes)
@@ -334,32 +384,48 @@ class Monitor:
                 f"Processing {index_procs} index and {thumb_procs} vcsi threads"
             )
 
-    def _is_online(self, name, site):
-        """Returns true of the Streamlink plugin finds any streams for the user on the site
+    def _is_online(self, streamer_id: int) -> bool:
+        """Returns true of the Streamlink plugin finds any public streams for the user
         TODO: Move this to processes.py
         """
 
-        # Check if we need to pause for rate limiting when pinging a site
-        diff_in_sec = datetime.now() - self.sites[site].last_checked_at
-        sec_to_sleep = self.sites[site].rate_limit_sec - diff_in_sec.total_seconds()
-        if sec_to_sleep > 0:
-            time.sleep(sec_to_sleep)
+        for site_name, site in self.streamers[streamer_id].sites:
+            # Check if we need to pause for rate limiting when pinging a site
+            diff_in_sec = datetime.now() - self.sites[site_name].last_checked_at
+            sec_to_sleep = (
+                self.sites[site_name].rate_limit_sec - diff_in_sec.total_seconds()
+            )
+            if sec_to_sleep > 0:
+                time.sleep(sec_to_sleep)
 
-        username = self.streamers[name].sites[site].streamer_name
-        self.sites[site].last_checked_at = datetime.now()
-        self.streamers[name].last_checked_at = datetime.now()
-        streams = {}
-        try:
-            url = self.sites[site].url.replace("{username}", username)
-            streams = self.streamlink.streams(url)
-        except streamlink.exceptions.PluginError as ex:
-            self.logger.debug(f"Streamlink plugin error while checking is_online: {ex}")
-        except Exception:
-            self.logger.exception("is_online exception")
+            username = self.streamers[streamer_id].sites[site_name].username
+            self.sites[site_name].last_checked_at = datetime.now()
+            self.streamers[streamer_id].last_checked_at = datetime.now()
+            streams = {}
+            try:
+                url = self.sites[site_name].url.replace("{username}", username)
+                options = {}
+                if site_name == "flirt4free":
+                    options = {
+                        "model_id": str(
+                            self.streamers[streamer_id].sites[site].external_id
+                        )
+                    }
 
-        return len(streams) > 1
+                streams = self.streamlink.streams(url, options)
+            except streamlink.exceptions.PluginError as ex:
+                self.logger.debug(
+                    f"Streamlink plugin error while checking is_online: {ex}"
+                )
+            except Exception:
+                self.logger.exception("is_online exception")
 
-    def _run_check_online_thread(self):
+            if len(streams) > 1:
+                self.streamers[streamer_id].sites[site_name].cam_status = CamStatus.PUB
+                return True
+        return False
+
+    def _run_check_online_thread(self) -> None:
         if not self.check_thread or not self.check_thread.is_alive():
             # Loop through all streamers to see if they are online
             self.check_thread = Thread(
@@ -374,66 +440,80 @@ class Monitor:
             )
             self.check_thread.start()
 
-    # def _start_recording(self, name, site, is_being_restarted=False):
-    #     if not is_being_restarted:
-    #         if self.streamers[name].is_recording:
-    #             return
-
-    #         self.streamers[name].is_recording = True
-    #         # self.streamers[name].started_at = datetime.now()
-    #         started_at = datetime.now()
-
-    #         self._start_recording_process(name, site)
-    #     else:
-    #         self._start_recording_process(name, site)
-
-    # def _start_recording_process(
-    #     self, name: str, site: str, started_at: datetime
-    # ) -> None:
-    #     self.logger.info(f"Starting to record {name} on {site}")
-
-    #     timestamp = started_at.strftime("%y-%m-%d-%H%M")
-
-    def _start_recording(self, name, site):
-        if self.streamers[name].is_recording:
+    def _start_recording(self, streamer_id: int) -> None:
+        if self.streamers[streamer_id].is_recording:
             return
 
-        self.streamers[name].is_recording = True
-        self.streamers[name].started_at = datetime.now()
+        name = self.streamers[streamer_id].name
+
+        # Find a public stream
+        site = ""
+        only_private = False
+        for site_name, item in self.streamers[streamer_id].sites.items():
+            if item.cam_status == CamStatus.PUB:
+                only_private = False
+                site = site_name
+                break
+            elif item.cam_status in [
+                CamStatus.EXCL_PRIV,
+                CamStatus.PRV,
+                CamStatus.SHOW,
+            ]:
+                only_private = True
+
+        if not site:
+            if only_private:
+                self.logger.warning(f"Only private streams available for {name}")
+            else:
+                self.logger.warning(f"No streams available for {name}")
+            return
 
         self.logger.info(f"Starting to record {name} on {site}")
+        self.streamers[streamer_id].is_recording = True
+        self.streamers[streamer_id].started_at = datetime.now()
 
-        timestamp = self.streamers[name].started_at.strftime("%y-%m-%d-%H%M")
+        timestamp = self.streamers[streamer_id].started_at.strftime("%y-%m-%d-%H%M")
         self.video_path_in_progress.mkdir(parents=True, exist_ok=True)
         filename = str(self.video_path_in_progress / f"{name}-{timestamp}-{site}.mp4")
         self.logger.debug(f"Saving to {filename}")
 
-        username = self.streamers[name].sites[site].streamer_name
+        username = self.streamers[streamer_id].sites[site].username
         url = self.sites[site].url.replace("{username}", username)
-        cmd = self.config["streamlink_cmd"].split(" ") + [
-            url,
-            "--plugin-dirs",
-            self.config["streamlink_plugin_path"],
-            "--default-stream",
-            self.config["streamlink_default_stream"],
+        cmd = (
+            self.config["streamlink_cmd"].strip().split(" ")
+            + self.config["streamlink_options"].strip().split(" ")
+            + [
+                url.strip(),
+                "--plugin-dir",
+                self.config["streamlink_plugin_path"].strip(),
+                "--default-stream",
+                self.config["streamlink_default_stream"].strip(),
+            ]
+        )
+        if site == "flirt4free":
+            cmd = cmd + [
+                "--flirt4free-model-id",
+                str(self.streamers[streamer_id].sites[site].external_id),
+            ]
+        cmd = cmd + [
             "-o",
             filename,
         ]
         self.logger.debug(f"Running: {' '.join(cmd)}")
-
-        self.processes[name] = {
+        self.processes[streamer_id] = {
             "path": filename,
             "site": site,
             "process": subprocess.Popen(
                 cmd,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 universal_newlines=True,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             ),
         }
 
-    def _stop_recording_process(self, name: str, restart: bool = False) -> None:
+    def _stop_recording_process(self, streamer_id: int, restart: bool = False) -> None:
         #     # If restart is false, we can just go ahead and kill the process, however if
         #     # it's true, we want to ensure we've successfully started the new recording
         #     # before stopping the current one.
@@ -465,24 +545,35 @@ class Monitor:
 
         # def _stop_video(self, name: str) -> None:
         try:
-            stdout, stderr = self.processes[name]["process"].communicate(timeout=15)
-            # self.logger.debug(f"STDOUT:{stdout}")
-            # self.logger.debug(f"STDERR:{stderr}")
+            if os.name == "posix":
+                self.processes[streamer_id]["process"].send_signal(signal.SIGINT)
+            else:
+                self.processes[streamer_id]["process"].send_signal(signal.CTRL_C_EVENT)
 
-            self.processes[name]["process"].terminate()
-            self.processes[name]["process"].wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            self.processes[name]["process"].kill()
+            self.processes[streamer_id]["process"].wait(timeout=3)
+        except Exception:
+            pass
         finally:
-            stdout, stderr = self.processes[name]["process"].communicate()
+            try:
+                self.processes[streamer_id]["process"].terminate()
+                self.processes[streamer_id]["process"].kill()
+                stdout, _ = self.processes[streamer_id]["process"].communicate(
+                    timeout=5
+                )
+                self.logger.debug(f"STDOUT:{stdout}")
+            except subprocess.TimeoutExpired:
+                self.logger.error("Timeout communicating to process")
 
-        self.logger.info(f"Stopped recording {name} on {self.processes[name]['site']}")
+        name = self.streamers[streamer_id].name
+        self.logger.info(
+            f"Stopped recording {name} on {self.processes[streamer_id]['site']}"
+        )
 
-        if name in self.streamers.keys():
-            self.streamers[name].is_recording = False
+        if streamer_id in self.streamers.keys():
+            self.streamers[streamer_id].is_recording = False
 
         # Move file into the to_process folder from in_progress
-        completed_path = Path(self.processes[name]["path"])
+        completed_path = Path(self.processes[streamer_id]["path"])
         if completed_path.exists():
             self.video_path_to_process.mkdir(parents=True, exist_ok=True)
             to_process_path = self.video_path_to_process / completed_path.name
@@ -490,51 +581,54 @@ class Monitor:
             self._index_video(to_process_path)
 
         # Remove from list of active processes
-        del self.processes[name]
+        del self.processes[streamer_id]
 
         # They may still be active on another site
         if restart and not self.shutting_down:
-            if name in self.streamers:
-                for site in self.streamers[name].sites:
-                    if self._is_online(name, site):
-                        self._start_recording(name, site)
-                        break
+            if (
+                streamer_id in self.streamers
+                and self.streamers[streamer_id].record != Record.NEVER
+            ):
+                for site in self.streamers[streamer_id].sites:
+                    # if self._is_online(name, site):
+                    self._start_recording(streamer_id)
+                    break
 
-    def _check_recording_processes(self):
+    def _check_recording_processes(self) -> None:
         """Check status of current recording processes"""
 
-        for name in list(self.processes):
-            if self.processes[name]["process"].poll() is not None:
-                self._stop_recording_process(name, True)
-            elif name not in self.streamers.keys():
+        for streamer_id in list(self.processes):
+            if self.processes[streamer_id]["process"].poll() is not None:
+                self._stop_recording_process(streamer_id, True)
+            elif streamer_id not in self.streamers.keys():
                 # Streamer was removed from config, stop recording
-                self._stop_recording_process(name)
+                self._stop_recording_process(streamer_id)
             else:
                 # Still running, restart if too long
-                stop_at = self.streamers[name].started_at + timedelta(
+                stop_at = self.streamers[streamer_id].started_at + timedelta(
                     minutes=self.config["max_recording_min"]
                 )
                 if stop_at < datetime.now():
+                    name = self.streamers[streamer_id].name
                     self.logger.info(
                         f"{name} has been recording for over {self.config['max_recording_min']} min, restarting"
                     )
 
                     # Check if they are available to restart
                     is_online = False
-                    if name in self.streamers:
-                        for site in self.streamers[name].sites:
-                            if self._is_online(name, site):
-                                is_online = True
-                                break
+                    if streamer_id in self.streamers:
+                        if self._is_online(streamer_id):
+                            is_online = True
+                            break
 
                     if is_online:
-                        self._stop_recording_process(name, True)
+                        self._stop_recording_process(streamer_id, True)
                     else:
                         # Reset the timer for them since we wouldn't be able to start a new recording
                         self.logger.info(
                             f"Unable to find a new stream for {name}, restarting the timer instead"
                         )
-                        self.streamers[name].started_at = datetime.now()
+                        self.streamers[streamer_id].started_at = datetime.now()
 
     def _is_video_incorrect_length(self, video_path: Path) -> bool:
         """Returns true if video is over max_recording_min + 10"""
@@ -616,14 +710,14 @@ class Monitor:
                 .output(video_path_out, **self.config.get("ffmpeg_output_options", {}))
                 .overwrite_output()
             )
-            self.logger.debug(ffmpeg.compile(stream).join(" "))
+            self.logger.debug(" ".join(ffmpeg.compile(stream)))
 
             self.index_processes[str(video_path)] = {
                 "started_at": datetime.now(),
                 "process": ffmpeg.run_async(stream, quiet=True),
             }
 
-    def _check_index_video_processes(self):
+    def _check_index_video_processes(self) -> None:
         for video_path in list(self.index_processes):
             process = self.index_processes[video_path]
             timed_out = False
@@ -701,7 +795,7 @@ class Monitor:
                 # Now that the indexed file is available, generate thumbnails for it
                 self._generate_thumbnails(video_path)
 
-    def _generate_thumbnails(self, video_path):
+    def _generate_thumbnails(self, video_path: str) -> None:
         """Kick off a vcsi process to generate a thumbnail file"""
 
         if "vcsi_options" in self.config:
@@ -719,7 +813,7 @@ class Monitor:
                 ),
             }
 
-    def _check_generate_thumbnail_processes(self):
+    def _check_generate_thumbnail_processes(self) -> None:
         for video_path in list(self.thumb_processes):
             process = self.thumb_processes[video_path]
             timed_out = False
@@ -767,7 +861,7 @@ class Monitor:
             else:
                 self.logger.debug(f"Thumbnail still running for {video_path}")
 
-    def _cleanup_thumbnails(self):
+    def _cleanup_thumbnails(self) -> None:
         # The process seems to leave bmp files in the tmp folder that don't get cleaned up
         # Delete anything older than x mins
         cmd = [
@@ -787,7 +881,7 @@ class Monitor:
             stderr=subprocess.PIPE,
         )
 
-    def _check_orphaned_files(self):
+    def _check_orphaned_files(self) -> None:
         """Look for any files in the to_process folder which are not being processed.
         Only do a few at a time so the system isn't slammed."""
         counter = 0
@@ -820,7 +914,7 @@ class Monitor:
                     self.orphan_file_list.pop(0)
                 self._index_video(file)
 
-    def _stop_gracefully(self):
+    def _stop_gracefully(self) -> None:
         """When a SIGTERM is received from Docker, stop all recording processes and then try to
         complete the required indexing/thumbnail generation before the SIGKILL is received.
         When using docker stop, ----time=600 will give it 10mins to stop."""
@@ -837,7 +931,7 @@ class Monitor:
             self._check_generate_thumbnail_processes()
             time.sleep(3)
 
-    def _load_sites_from_db(self):
+    def _load_sites_from_db(self) -> None:
         """Load the sites from the database, and add in data from the config file"""
         sites = run_sql("SELECT name, display_name FROM site;")
         for site in sites:
@@ -853,54 +947,71 @@ class Monitor:
                 last_checked_at=datetime.now(),
             )
 
-    def _load_streamers_from_db(self):
+    def _load_streamers_from_db(self) -> None:
         """Load the streamers from the database"""
         streamers = run_sql(
             """
             SELECT  streamer.id, streamer.first_online, streamer.last_online, streamer.days_online,
-                    streamer_sites.name, streamer_sites.is_primary, streamer_sites.site_name
+                    streamer_sites.name, streamer_sites.is_primary, streamer_sites.site_name, streamer_sites.site_id
             FROM streamer_sites
             JOIN streamer ON streamer.id = streamer_sites.streamer_id;
             """
         )
 
-        # Keep a map of id->name so the non-primary streamers can be quickly attached
-        id_to_name = {}
-        non_primary_streamers = []
-
         for streamer in streamers:
-            if streamer["is_primary"]:
-                id_to_name[streamer["id"]] = streamer["name"]
+            streamer_id = streamer["id"]
+            name = streamer["name"]
+            site = streamer["site_name"]
 
-                self.streamers[streamer["name"]] = Streamer(
-                    id=streamer["id"],
+            # Set up username_by_site so everyone can be quickly looked up to their streamer id
+            self.username_by_site[f"{name}-{site}"] = streamer_id
+
+            if streamer_id not in self.streamers:
+                # First entry
+                self.streamers[streamer_id] = Streamer(
+                    id=streamer_id,
+                    name=name,
                     first_online=streamer["first_online"],
                     last_online=streamer["last_online"],
                     days_online=streamer["days_online"],
-                    name=streamer["name"],
                     sites={
-                        streamer["site_name"]: Streamer_Site(
-                            site_name=streamer["site_name"],
-                            streamer_name=streamer["name"],
+                        site: Streamer_Site(
+                            streamer_id=streamer_id,
+                            external_id=streamer["site_id"],
+                            site_name=site,
+                            username=name,
                             is_primary=True,
                         )
                     },
                 )
             else:
-                non_primary_streamers.append(streamer)
-
-        # Now we can add the non-primary streamers to their existing entry
-        for non_primary_streamer in non_primary_streamers:
-            if non_primary_streamer["id"] in id_to_name:
-                self.streamers[id_to_name[non_primary_streamer["id"]]].sites[
-                    non_primary_streamer["site_name"]
-                ] = Streamer_Site(
-                    site_name=non_primary_streamer["site_name"],
-                    streamer_name=non_primary_streamer["name"],
+                # Append subsequent sites
+                self.streamers[streamer_id].sites[site] = Streamer_Site(
+                    streamer_id=streamer_id,
+                    external_id=streamer["site_id"],
+                    site_name=site,
+                    username=name,
                     is_primary=False,
                 )
 
-    def _query_site_api(self, site_name):
+    def _make_site_api_call(self, site_name: str, url: str) -> None:
+        r = requests.get(url)
+        r.raise_for_status()
+
+        if site_name == "flirt4free":
+            data = r.text
+            data = data[28:]
+            data = data.split("'favorites':", 1)[0]
+            data = data.replace("'models'", '"models"')
+            data = data[:-12] + "]}"
+            data = json.loads(data)
+            data = data["models"]
+        else:
+            data = r.json()
+
+        return data
+
+    def _query_site_api(self, site_name: str) -> None:
         if not self.sites[site_name].api_url:
             return
 
@@ -909,9 +1020,19 @@ class Monitor:
             url = url.replace("{API_KEY}", self.sites[site_name].api_key)
 
         try:
-            r = requests.get(url)
-            r.raise_for_status()
-            data = r.json()
+            # SC only returns 1000 records at a time
+            if site_name == "stripchat":
+                data = []
+                for i in range(50):
+                    qualified_url = url.replace("{OFFSET}", f"{i}000")
+                    output = self._make_site_api_call(site_name, qualified_url)
+                    data += output["models"]
+                    # self.logger.debug(f"Loaded {len(data)} models for Stripchat")
+
+                    if output["count"] < 1000:
+                        break
+            else:
+                data = self._make_site_api_call(site_name, url)
         except (
             requests.exceptions.RequestException,
             json.decoder.JSONDecodeError,
@@ -919,8 +1040,8 @@ class Monitor:
             self.logger.exception(f"{site_name} Error")
             return
 
-        if site_name == "stripchat":
-            data = data["models"]
+        conn = get_conn()
+        c = conn.cursor()
 
         male_genders = ["Male", "Couple Male + Male", "m", "male", "males"]
         # Loop through the currently loaded streamers to find new ones
@@ -928,167 +1049,120 @@ class Monitor:
         streamers_to_update = []
         streamers_new = []
         for streamer in data:
-            username = streamer["username"]
+            username = streamer.get("username", None) or streamer.get("model_seo_name")
 
             # Skip male streamers
             if self.config.get("ignore_male_streamers", False):
-                is_male = False
-                for text in male_genders:
-                    if streamer.get("gender") == text:
-                        is_male = True
-                        break
-                if is_male:
+                streamer_gender = streamer.get("gender", "not male")
+                if streamer_gender in male_genders:
                     continue
 
-            # If they exist and have a database id
-            if username in self.streamers and self.streamers[username].id:
+            # Site assigned id instead of username
+            external_id = (
+                streamer.get("id", None) or streamer.get("model_id", None) or "NULL"
+            )
+            cam_status = self._get_cam_status(site_name, streamer)
+            username_key = f"{username}-{site_name}"
+
+            # If they exist with a database id
+            if username_key in self.username_by_site:
+                streamer_id = self.username_by_site[username_key]
+
                 counter = 0
-                if self._update_online_count(username):
+                if self._update_online_count(streamer_id):
                     counter = 1
 
                 streamers_to_update.append(
                     (
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         counter,
-                        self.streamers[username].id,
+                        streamer_id,
                     )
                 )
 
-                # Are they missing a record for this site?
-                if site_name not in self.streamers[username].sites:
-                    # Site assigned id instead of username
-                    site_id = streamer.get("id", "NULL")
-
-                    run_sql(
-                        """
-                        INSERT INTO streamer_sites(streamer_id, name, site_id, is_primary, site_name)
-                        VALUES (?, ?, ?, ?, ?);
-                        """,
-                        (
-                            self.streamers[username].id,
-                            username,
-                            site_id,
-                            0,
-                            site_name,
-                        ),
-                    )
-                    self.streamers[username].sites[site_name] = Streamer_Site(
-                        site_name=site_name,
-                        streamer_name=username,
-                        is_primary=False,
-                        is_in_db=True,
+                if self.streamers[streamer_id].record != Record.NEVER:
+                    old_cam_status = (
+                        self.streamers[streamer_id].sites[site_name].cam_status
                     )
 
-                # Should we start recording them?
-                if self.streamers[username].watch:
-                    if site_name == "chaturbate":
-                        if streamer["current_show"] == "public":
-                            self._start_recording(username, site_name)
-                    elif site_name == "stripchat":
-                        if streamer["status"] == "public":
-                            self._start_recording(username, site_name)
-                    else:
-                        self._start_recording(username, site_name)
-            else:
-                found = False
-
-                # They don't have a primary record, maybe they are on multiple sites
-                for existing_streamer in self.streamers.values():
-                    if existing_streamer.id and site_name in existing_streamer.sites:
-                        if existing_streamer.sites[site_name].streamer_name == username:
-                            found = True
-
-                            counter = 0
-                            if self._update_online_count(existing_streamer.name):
-                                counter = 1
-
-                            streamers_to_update.append(
-                                (
-                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    counter,
-                                    existing_streamer.id,
-                                )
+                    # Their status has changed since the last update
+                    if old_cam_status != cam_status:
+                        if (
+                            old_cam_status == CamStatus.OFFLINE
+                            and cam_status == CamStatus.PUB
+                        ):
+                            # They just came online
+                            pass
+                        elif (
+                            old_cam_status == CamStatus.PUB
+                            and cam_status != CamStatus.PUB
+                        ):
+                            # They've gone into some kind of private
+                            self.logger.info(
+                                f"{self.streamers[streamer_id].name} has gone {cam_status.name} on {site_name}"
+                            )
+                        elif (
+                            old_cam_status != CamStatus.OFFLINE
+                            and old_cam_status != CamStatus.PUB
+                            and cam_status == CamStatus.PUB
+                        ):
+                            # They were private and are now public
+                            self.logger.info(
+                                f"{self.streamers[streamer_id].name} is now PUBLIC on {site_name}"
                             )
 
-                            # Create a streamer_site record for them
-                            if not existing_streamer.sites[site_name].is_in_db:
-                                # Site assigned id instead of username
-                                site_id = streamer.get("id", "NULL")
+                    # Inside this if we know we always want to record this streamer
+                    self._start_recording(streamer_id)
 
-                                streamers = run_sql(
-                                    """
-                                    INSERT INTO streamer_sites(streamer_id, name, site_id, is_primary, site_name)
-                                    VALUES (?, ?, ?, ?, ?);
-                                    """,
-                                    (
-                                        existing_streamer.id,
-                                        username,
-                                        site_id,
-                                        0,
-                                        site_name,
-                                    ),
-                                )
-                                existing_streamer.sites[site_name].is_in_db = True
+                # Update the current status for the site
+                self.streamers[streamer_id].sites[site_name].cam_status = cam_status
+            else:
+                # First time we've ever seen them since they have no database entry
+                c.execute(
+                    f"INSERT INTO streamer (first_online, days_online) VALUES ('{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}', 1)"
+                )
+                # Python implicitly opens a transaction for INSERT and it must be committed
+                conn.commit()
+                streamer_id = c.lastrowid
+                streamer["streamer_id"] = streamer_id
+                streamers_to_add.append(streamer)
 
-                            # Should we start recording them?
-                            if existing_streamer.watch:
-                                self._start_recording(existing_streamer.name, site_name)
+                c.execute(
+                    f"INSERT INTO streamer_sites ('streamer_id', 'name', 'site_id', 'site_name') VALUES ({streamer_id}, '{username}', {external_id}, '{site_name}')"
+                )
+                conn.commit()
 
-                if not found:
-                    streamers_to_add.append(streamer)
+                # Set up streamers_by_site so everyone can be quickly looked up to their streamer id
+                self.username_by_site[f"{username}-{site_name}"] = streamer_id
 
-            # Check if we consider them new and we don't watch them, get their picture.
-            if self._is_streamer_new(streamer):
-                if username in self.streamers:
-                    if not self.streamers[username].watch:
-                        streamers_new.append(streamer)
-                else:
-                    streamers_new.append(streamer)
+                # Create the in memory record for them
+                self.streamers[streamer_id] = Streamer(
+                    id=streamer_id,
+                    name=username,
+                    sites={
+                        site_name: Streamer_Site(
+                            streamer_id=streamer_id,
+                            external_id=external_id,
+                            site_name=site_name,
+                            username=username,
+                            cam_status=Record.NEVER,
+                        )
+                    },
+                )
+
+            # Check if we consider them new and we don't record them, get their picture.
+            if (
+                self._is_streamer_new(streamer, streamer_id)
+                and self.streamers[streamer_id].record == Record.NEVER
+            ):
+                streamer["streamer_id"] = streamer_id
+                streamers_new.append(streamer)
 
         self.logger.debug(
             f"{site_name}: {len(streamers_to_update)} streamers to update"
         )
         if len(streamers_to_add) > 0:
             self.logger.debug(f"{site_name}: {len(streamers_to_add)} streamers to add")
-
-        conn = get_conn()
-        c = conn.cursor()
-        # Add everyone new to the db
-        for streamer in streamers_to_add:
-            username = streamer["username"]
-            c.execute(
-                f"INSERT INTO streamer (first_online, days_online) VALUES ('{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}', 1)"
-            )
-            # Create/Update the in memory record for them
-            if username in self.streamers:
-                self.streamers[username].id = c.lastrowid
-
-                if site_name not in self.streamers[username].sites:
-                    self.streamers[username].sites[site_name] = Streamer_Site(
-                        site_name=site_name, streamer_name=streamer["username"]
-                    )
-
-                # Should we start recording them?
-                if self.streamers[username].watch:
-                    self._start_recording(username, site_name)
-            else:
-                self.streamers[username] = Streamer(
-                    id=c.lastrowid,
-                    name=username,
-                    sites={
-                        site_name: Streamer_Site(
-                            site_name=site_name, streamer_name=username
-                        )
-                    },
-                )
-
-            # Site assigned id instead of username
-            site_id = streamer.get("id", "NULL")
-
-            c.execute(
-                f"INSERT INTO streamer_sites (streamer_id, name, site_id, site_name) VALUES ({c.lastrowid}, \"{streamer['username']}\", {site_id}, '{site_name}')"
-            )
-        conn.commit()
 
         # Update everyone's last seen to now
         c.executemany(
@@ -1105,45 +1179,78 @@ class Monitor:
             # Get a picture for all streamers marked as new
             self._get_new_thumbnail(streamers_new, site_name)
 
-    def _update_online_count(self, username):
+    # Get the status of a stream for that site
+    def _get_cam_status(self, site, data):
+        match site:
+            case "chaturbate":
+                match data["current_show"]:
+                    case "public":
+                        return CamStatus.PUB
+                    case "private":
+                        return CamStatus.PRV
+                    case "hidden":
+                        return CamStatus.SHOW
+                    case "away":
+                        return CamStatus.OFFLINE
+
+            case "stripchat":
+                match data["status"]:
+                    case "p2":
+                        return CamStatus.EXCL_PRIV
+                    case "private" | "virtualPrivate":
+                        return CamStatus.PRV
+                    case "groupShow":
+                        return CamStatus.SHOW
+                    case "public":
+                        return CamStatus.PUB
+
+            case "flirt4free":
+                match data["room_status"]:
+                    case "In Open":
+                        return CamStatus.PUB
+                    case "In Private":
+                        if data["multi_user_private"] == "N":
+                            return CamStatus.EXCL_PRIV
+                        return CamStatus.PRV
+
+        # Assume they're online and public and let it error out downstream
+        return CamStatus.PUB
+
+    def _update_online_count(self, streamer_id: int) -> bool:
         """Update the in memory count of how many times they've been online"""
         # Did we last see them over 24 hours ago?
-        if self.streamers[username].last_online < datetime.now() - timedelta(days=1):
-            self.streamers[username].last_online = datetime.now()
-            self.streamers[username].days_online += 1
+        if self.streamers[streamer_id].last_online < datetime.now() - timedelta(days=1):
+            self.streamers[streamer_id].last_online = datetime.now()
+            self.streamers[streamer_id].days_online += 1
             return True
         return False
 
-    def _is_streamer_new(self, streamer):
+    def _is_streamer_new(self, streamer: Dict, streamer_id: int) -> bool:
         """Find out if we consider a streamer as new."""
         if self.config["use_is_new_flag"]:
             if streamer.get("is_new", False) or streamer.get("isNew", False):
                 return True
             return False
 
-        # Have we not seen them before?
-        if streamer["username"] not in self.streamers:
-            return True
         # If first_online is longer than days_since_first_seen days ago, Not New
-        elif self.streamers[
-            streamer["username"]
-        ].first_online < datetime.now() - timedelta(
+        if self.streamers[streamer_id].first_online < datetime.now() - timedelta(
             days=self.config["days_since_first_seen"]
         ):
             return False
         # How many times have we seen them, if more than no_longer_new, Not New
         elif (
-            self.streamers[streamer["username"]].days_online
-            > self.config["no_longer_new_days"]
+            self.streamers[streamer_id].days_online > self.config["no_longer_new_days"]
         ):
             return False
 
         return True
 
-    def _get_thumbnail(self, streamers, site, is_new=False):
+    def _get_thumbnail(self, streamers: Dict, site: str, is_new: bool = False) -> None:
         for streamer in streamers:
             try:
-                username = streamer["username"]
+                username = streamer.get("username", None) or streamer.get(
+                    "model_seo_name"
+                )
                 json_url = None
 
                 if site == "chaturbate":
@@ -1174,7 +1281,7 @@ class Monitor:
 
                 if is_new:
                     folder = self.streamer_new_thumb_path / str(
-                        self.streamers[username].days_online
+                        self.streamers[streamer.streamer_id].days_online
                     ).zfill(4)
                 else:
                     prefix = username[0].lower()
@@ -1221,18 +1328,16 @@ class Monitor:
             except Exception as e:
                 self.logger.error(f"Error getthing thumbnail: {e}")
 
-    def _get_new_thumbnail(self, streamers, site):
+    def _get_new_thumbnail(self, streamers: Dict, site: str) -> None:
         # Only get those we need new thumbs for
         streamers_to_get = []
         for streamer in streamers:
-            name = streamer["username"]
-
-            if name in self.streamers and self.streamers[
-                name
+            if self.streamers[
+                streamer.streamer_id
             ].last_picture_at < datetime.now() - timedelta(
                 minutes=self.config["new_streamer_thumb_min"]
             ):
-                self.streamers[streamer["username"]].last_picture_at = datetime.now()
+                self.streamers[streamer.streamer_id].last_picture_at = datetime.now()
                 streamers_to_get.append(streamer)
 
         self.logger.debug(
@@ -1240,7 +1345,7 @@ class Monitor:
         )
         self._get_thumbnail(streamers_to_get, site, True)
 
-    def _fix_permissions(self, path):
+    def _fix_permissions(self, path: Path) -> None:
         shutil.chown(str(path), "nobody", "users")
         path.chmod(
             path.stat().st_mode
@@ -1260,13 +1365,16 @@ class Monitor:
                 self._query_site_api("chaturbate")
                 # Query Stripchat API
                 self._query_site_api("stripchat")
-                # Query Stripchat API
+                # Query Bongacams API
                 self._query_site_api("bongacams")
+                # Query Flirt4Free API
+                self._query_site_api("flirt4free")
 
                 self._run_check_online_thread()
                 while not self.start_recording_q.empty():
-                    streamer_name, site = self.start_recording_q.get()
-                    self._start_recording(streamer_name, site)
+                    streamer_id, site = self.start_recording_q.get()
+                    self.streamers[streamer_id].sites[site].cam_status = CamStatus.PUB
+                    self._start_recording(streamer_id)
 
                 self._check_recording_processes()
                 self._check_index_video_processes()
