@@ -8,7 +8,7 @@ class CamStatus(Enum):
     OFFLINE = 1
     PUB = 2
     PRV = 3
-    EXCL_PRIV = 4
+    EX_PRV = 4
     SHOW = 5
 
 
@@ -16,7 +16,7 @@ class Record(Enum):
     NEVER = 1
     ALWAYS = 2
     PRV = 3
-    EXCL_PRIV = 4
+    EX_PRV = 4
 
 
 @dataclass
@@ -31,6 +31,7 @@ class Streamer_Site:
     # This is just to avoid trying to insert secondary site records every refresh
     is_in_db: bool = True
     cam_status: CamStatus = CamStatus.OFFLINE
+    last_checked_at: datetime = datetime(1970, 1, 1)
 
 
 @dataclass
@@ -57,6 +58,17 @@ class Streamer:
     # they haven't been seen online in a long time.
     last_checked_at: datetime = datetime.now()
     last_picture_at: datetime = datetime(1970, 1, 1)
+
+    def current_status(self):
+        status = CamStatus.OFFLINE
+        for item in self.sites.values():
+            if item.cam_status == CamStatus.EX_PRV:
+                return item.cam_status
+            elif item.cam_status in [CamStatus.PRV, CamStatus.SHOW]:
+                status = item.cam_status
+            elif item.cam_status == CamStatus.PUB and status == CamStatus.OFFLINE:
+                status = CamStatus.PUB
+        return status
 
 
 @dataclass

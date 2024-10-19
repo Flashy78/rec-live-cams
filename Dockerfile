@@ -16,7 +16,7 @@ RUN pip3 install cmake "git+https://github.com/Flashy78/vcsi.git@empty-thumbnail
     streamlink \
     ffmpeg-python \
     cvlib opencv-contrib-python-headless tensorflow==2.10.0 \
-    face_recognition
+    face_recognition deepdiff
 
 RUN mkdir -p /app/download && \
     mkdir /app/config
