@@ -341,16 +341,19 @@ class Monitor:
                             site_name
                         ].streamer_id = streamer_id
 
-                        # Update the database record with the association
-                        c.execute(
-                            """
-                            UPDATE streamer_sites
-                            SET streamer_id = ?
-                            WHERE name = ? AND site_name = ?;
-                            """,
-                            (streamer_id, streamer_name, site_name),
-                        )
-                        conn.commit()
+                        try:
+                            # Update the database record with the association
+                            c.execute(
+                                """
+                                UPDATE streamer_sites
+                                SET streamer_id = ?
+                                WHERE name = ? AND site_name = ?;
+                                """,
+                                (streamer_id, streamer_name, site_name),
+                            )
+                            conn.commit()
+                        except IntegrityError:
+                            pass
 
                     for key in del_from_dict:
                         if key in newConfig["streamers"][name]:
@@ -429,13 +432,6 @@ class Monitor:
             case _:
                 return full_name
 
-    def _get_streamer_names_from_ids(self, ids: List[int]) -> List[str]:
-        names = []
-        for id in ids:
-            names.append(self.streamers[id].name)
-
-        return names
-
     def _list_who_is_recording(self) -> None:
         recording = []
         for id, streamer in self.streamers.items():
@@ -444,8 +440,17 @@ class Monitor:
 
         if recording and self.currently_recording != set(recording):
             self.currently_recording = set(recording)
+
+            names = []
+            for id in recording:
+                name = self.streamers[id].name
+                status = self.streamers[id].current_status()
+                if status != CamStatus.PUB:
+                    name += f" ({status.name})"
+                names.append(name)
+
             self.logger.info(
-                f"Recording: {(', ').join(sorted(self._get_streamer_names_from_ids(recording), key=str.casefold))}"
+                f"Recording: {(', ').join(sorted(names, key=str.casefold))}"
             )
 
         if len(recording) != len(self.processes):
@@ -561,11 +566,12 @@ class Monitor:
 
         timestamp = self.streamers[streamer_id].started_at.strftime("%y-%m-%d-%H%M")
         self.video_path_in_progress.mkdir(parents=True, exist_ok=True)
+        cam_status = ""
         if desc:
-            desc = desc.title() + "-"
+            cam_status = desc.title() + "-"
         filename = str(
             self.video_path_in_progress
-            / f"{name}-{timestamp}-{desc}{self._get_short_site_name(site)}.mp4"
+            / f"{name}-{timestamp}-{cam_status}{self._get_short_site_name(site)}.mp4"
         )
         self.logger.debug(f"Saving to {filename}")
 
@@ -599,6 +605,7 @@ class Monitor:
         self.processes[streamer_id] = {
             "path": filename,
             "site": site,
+            "desc": desc,
             "process": subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -677,6 +684,7 @@ class Monitor:
             self._index_video(to_process_path)
 
         # Remove from list of active processes
+        desc = self.processes[streamer_id]["desc"]
         del self.processes[streamer_id]
 
         # They may still be active on another site
@@ -685,7 +693,7 @@ class Monitor:
                 streamer_id in self.streamers
                 and self.streamers[streamer_id].record != Record.NEVER
             ):
-                self._start_recording(streamer_id)
+                self._start_recording(streamer_id, desc)
 
     def _should_be_recording(self, streamer_id: int) -> bool:
         """Based on a streamers settings and their current cam status on different sites,
@@ -977,7 +985,7 @@ class Monitor:
                 else:
                     # Move to completed folder
                     final_path = self.completed_path
-                    if "Prv " in file_path.name:
+                    if "Prv " or "Show " in file_path.name:
                         final_path = self.completed_path_prv
                     self._fix_permissions(file_path)
                     shutil.move(file_path, final_path / file_path.name)
@@ -1186,8 +1194,6 @@ class Monitor:
             external_id = (
                 streamer.get("id", None) or streamer.get("model_id", None) or "NULL"
             )
-            if username == "LornaDeere":
-                pass
             cam_status = self._get_cam_status(site_name, streamer)
             username_key = f"{username}-{site_name}"
 
@@ -1226,7 +1232,6 @@ class Monitor:
                             and cam_status == CamStatus.PUB
                         ):
                             # They just came online
-                            self.streamers[streamer_id].current_status = cam_status
                             self._start_recording(streamer_id)
                         elif (
                             old_cam_status == CamStatus.PUB
